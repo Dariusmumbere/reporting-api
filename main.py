@@ -90,6 +90,37 @@ class Attachment(Base):
 # Create tables
 Base.metadata.create_all(bind=engine)
 
+# Create initial admin user if not exists
+def create_initial_admin():
+    db = SessionLocal()
+    try:
+        admin_email = "admin@reportsystem.com"
+        admin_password = "Admin@1234"  # Strong default password
+        admin_user = db.query(User).filter(User.email == admin_email).first()
+        
+        if not admin_user:
+            hashed_password = pwd_context.hash(admin_password)
+            admin_user = User(
+                email=admin_email,
+                full_name="System Administrator",
+                hashed_password=hashed_password,
+                is_active=True,
+                is_admin=True
+            )
+            db.add(admin_user)
+            db.commit()
+            print("Initial admin user created successfully")
+            print(f"Email: {admin_email}")
+            print(f"Password: {admin_password}")
+        else:
+            print("Admin user already exists")
+    except Exception as e:
+        print(f"Error creating initial admin: {e}")
+    finally:
+        db.close()
+
+create_initial_admin()
+
 # Pydantic models
 class Token(BaseModel):
     access_token: str
