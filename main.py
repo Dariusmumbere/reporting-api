@@ -208,6 +208,7 @@ async def initialize_database():
 @app.on_event("startup")
 async def startup_event():
     await initialize_database()
+    os.makedirs("attachments", exist_ok=True)
 
 # Authentication routes
 @app.post("/token", response_model=Token)
