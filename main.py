@@ -181,7 +181,7 @@ async def initialize_database():
             )
         ''')
 
-        await conn.execute(''
+        await conn.execute('''
             CREATE TABLE IF NOT EXISTS attachments (
                 id SERIAL PRIMARY KEY,
                 report_id INTEGER REFERENCES reports(id),
