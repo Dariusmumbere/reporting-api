@@ -6,3 +6,4 @@ python-jose[cryptography]
 asyncpg
 python-multipart
 pydantic[email]
+bcrypt
