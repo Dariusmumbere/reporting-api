@@ -7,3 +7,4 @@ jose
 passlib
 python-jose
 pydantic[email]
+bcrypt
