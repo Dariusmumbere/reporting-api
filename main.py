@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, B
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.sql import func
+from sqlalchemy.exc import OperationalError
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://inventory_ihpg_user:EKkxYBPqllVfkTkIDKYRzGZKDX5Vw2ek@dpg-d16jkimmcj7s73c7li80-a/inventory_ihpg")
@@ -87,8 +88,23 @@ class Attachment(Base):
     
     report = relationship("Report", back_populates="attachments")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Create tables with error handling
+def create_tables():
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("Tables created successfully")
+    except OperationalError as e:
+        print(f"Error creating tables: {e}")
+        # Try again with individual tables
+        try:
+            User.__table__.create(bind=engine, checkfirst=True)
+            Report.__table__.create(bind=engine, checkfirst=True)
+            Attachment.__table__.create(bind=engine, checkfirst=True)
+            print("Tables created individually")
+        except Exception as e:
+            print(f"Error creating tables individually: {e}")
+
+create_tables()
 
 # Create initial admin user if not exists
 def create_initial_admin():
@@ -116,6 +132,16 @@ def create_initial_admin():
             print("Admin user already exists")
     except Exception as e:
         print(f"Error creating initial admin: {e}")
+        # Try to add missing columns if they don't exist
+        try:
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE")
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE")
+            db.commit()
+            print("Added missing columns to users table")
+            # Try creating admin again
+            create_initial_admin()
+        except Exception as e:
+            print(f"Error adding columns: {e}")
     finally:
         db.close()
 
@@ -142,7 +168,7 @@ class UserInDB(UserBase):
     is_admin: bool
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # Updated from orm_mode=True for Pydantic v2
 
 class ReportBase(BaseModel):
     title: str
@@ -159,7 +185,7 @@ class Report(ReportBase):
     owner_id: int
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class ReportWithAttachments(Report):
     attachments: List[str] = []
@@ -265,6 +291,7 @@ async def create_user(
         email=user.email,
         full_name=user.full_name,
         hashed_password=hashed_password,
+        is_active=True,
         is_admin=False  # Only admins can create users, but new users are not admins by default
     )
     db.add(db_user)
@@ -381,3 +408,7 @@ async def get_all_users(
 ):
     users = db.query(User).offset(skip).limit(limit).all()
     return users
+
+@app.get("/")
+async def root():
+    return {"message": "Professional Reporting System API is running"}
