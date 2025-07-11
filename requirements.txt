@@ -6,3 +6,4 @@ psycopg2-binary
 jose
 passlib
 python-jose
+pydantic[email]
