@@ -181,7 +181,7 @@ async def initialize_database():
             )
         ''')
 
-        await conn.execute('''
+        await conn.execute(''
             CREATE TABLE IF NOT EXISTS attachments (
                 id SERIAL PRIMARY KEY,
                 report_id INTEGER REFERENCES reports(id),
@@ -204,11 +204,16 @@ async def initialize_database():
     finally:
         await conn.close()
 
+# Create attachments directory if it doesn't exist
+os.makedirs("attachments", exist_ok=True)
+
+# Serve static files (attachments)
+app.mount("/attachments", StaticFiles(directory="attachments"), name="attachments")
+
 # Startup event
 @app.on_event("startup")
 async def startup_event():
     await initialize_database()
-    os.makedirs("attachments", exist_ok=True)
 
 # Authentication routes
 @app.post("/token", response_model=Token)
@@ -270,7 +275,6 @@ async def create_report(
     # Handle file attachments
     attachment_paths = []
     if files:
-        os.makedirs("attachments", exist_ok=True)
         for file in files:
             file_path = f"attachments/{report['id']}_{file.filename}"
             with open(file_path, "wb") as buffer:
@@ -368,7 +372,6 @@ async def update_report(
     # Handle file attachments
     attachment_paths = []
     if files:
-        os.makedirs("attachments", exist_ok=True)
         for file in files:
             file_path = f"attachments/{report_id}_{file.filename}"
             with open(file_path, "wb") as buffer:
@@ -409,9 +412,6 @@ async def delete_report(report_id: int, db = Depends(get_db), current_user: User
     await db.execute("DELETE FROM reports WHERE id = $1", report_id)
     
     return {"message": "Report deleted successfully"}
-
-# Serve static files (attachments)
-app.mount("/attachments", StaticFiles(directory="attachments"), name="attachments")
 
 if __name__ == "__main__":
     import uvicorn
