@@ -57,7 +57,7 @@ class User(UserBase):
     role: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class Token(BaseModel):
     access_token: str
@@ -82,7 +82,7 @@ class Report(ReportBase):
     attachments: List[str] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # Database connection pool
 async def get_db():
@@ -103,7 +103,7 @@ async def authenticate_user(email: str, password: str, db):
     user = await db.fetchrow("SELECT * FROM users WHERE email = $1", email)
     if not user:
         return False
-    if not verify_password(password, user["password"]):
+    if not verify_password(password, user.get("hashed_password")):  # Changed from "password" to "hashed_password"
         return False
     return user
 
@@ -156,11 +156,16 @@ async def check_staff(current_user: User = Depends(get_current_active_user)):
 async def initialize_database():
     conn = await asyncpg.connect(DATABASE_URL)
     try:
+        # Drop tables if they exist (for development only - remove in production)
+        await conn.execute('DROP TABLE IF EXISTS attachments CASCADE')
+        await conn.execute('DROP TABLE IF EXISTS reports CASCADE')
+        await conn.execute('DROP TABLE IF EXISTS users CASCADE')
+
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 email VARCHAR(255) UNIQUE NOT NULL,
-                password VARCHAR(255) NOT NULL,
+                hashed_password VARCHAR(255) NOT NULL,  -- Changed from "password" to "hashed_password"
                 full_name VARCHAR(255) NOT NULL,
                 is_active BOOLEAN DEFAULT TRUE,
                 role VARCHAR(50) DEFAULT 'staff',
@@ -197,7 +202,7 @@ async def initialize_database():
         if not admin_exists:
             hashed_password = get_password_hash("Admin@123")
             await conn.execute('''
-                INSERT INTO users (email, password, full_name, role)
+                INSERT INTO users (email, hashed_password, full_name, role)
                 VALUES ($1, $2, $3, $4)
             ''', admin_email, hashed_password, "Admin User", "admin")
             
@@ -239,7 +244,7 @@ async def register_user(user: UserCreate, db = Depends(get_db), admin: User = De
     
     hashed_password = get_password_hash(user.password)
     new_user = await db.fetchrow('''
-        INSERT INTO users (email, password, full_name, role)
+        INSERT INTO users (email, hashed_password, full_name, role)
         VALUES ($1, $2, $3, 'staff')
         RETURNING id, email, full_name, is_active, role
     ''', user.email, hashed_password, user.full_name)
