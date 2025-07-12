@@ -1,64 +1,84 @@
-import os
-from datetime import datetime, timedelta
-from typing import Optional, List
-
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr
-from passlib.context import CryptContext
+from pydantic import BaseModel, EmailStr, validator
+from typing import List, Optional
+from datetime import datetime, timedelta
 from jose import JWTError, jwt
-import asyncpg
-from dotenv import load_dotenv
-
-load_dotenv()
+from passlib.context import CryptContext
+import os
+import uuid
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship, Session
+from sqlalchemy.sql import func
 
 # Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://inventory_ihpg_user:EKkxYBPqllVfkTkIDKYRzGZKDX5Vw2ek@dpg-d16jkimmcj7s73c7li80-a/inventory_ihpg")
+DATABASE_URL = "postgresql://inventory_ihpg_user:EKkxYBPqllVfkTkIDKYRzGKDX5Vw2ek@dpg-d16jkimmcj7s73c7li80-a/inventory_ihpg"
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
 # Security configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
+SECRET_KEY = "your-secret-key-here"  # In production, use a proper secret key from environment variables
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Initialize FastAPI app
-app = FastAPI(title="Professional Reporting System",
-              description="A modern reporting platform with role-based access control",
-              version="1.0.0")
-
-# CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# OAuth2 scheme
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 # Models
-class UserBase(BaseModel):
-    email: EmailStr
-    full_name: str
+class User(Base):
+    __tablename__ = "users"
 
-class UserCreate(UserBase):
-    password: str
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    role = Column(String, default="staff", nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_active = Column(DateTime(timezone=True))
 
-class User(UserBase):
-    id: int
-    is_active: bool
-    role: str
+    reports = relationship("Report", back_populates="author")
+    attachments = relationship("Attachment", back_populates="uploader")
 
-    class Config:
-        from_attributes = True
+class Report(Base):
+    __tablename__ = "reports"
 
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=False)
+    category = Column(String, nullable=False)
+    status = Column(String, default="pending", nullable=False)
+    admin_comments = Column(String)
+    author_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    author = relationship("User", back_populates="reports")
+    attachments = relationship("Attachment", back_populates="report")
+
+class Attachment(Base):
+    __tablename__ = "attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)
+    size = Column(Integer, nullable=False)
+    url = Column(String, nullable=False)
+    report_id = Column(Integer, ForeignKey("reports.id"))
+    uploader_id = Column(Integer, ForeignKey("users.id"))
+
+    report = relationship("Report", back_populates="attachments")
+    uploader = relationship("User", back_populates="attachments")
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# Pydantic models
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -66,44 +86,91 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     email: Optional[str] = None
 
+class UserBase(BaseModel):
+    email: EmailStr
+    name: str
+
+class UserCreate(UserBase):
+    password: str
+    role: str = "staff"
+
+    @validator('password')
+    def password_complexity(cls, v):
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not any(c.islower() for c in v):
+            raise ValueError("Password must contain at least one lowercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must contain at least one digit")
+        if not any(c in "!@#$%^&*()_+" for c in v):
+            raise ValueError("Password must contain at least one special character")
+        return v
+
+class UserInDB(UserBase):
+    id: int
+    role: str
+    is_active: bool
+    created_at: datetime
+    last_active: Optional[datetime]
+
+    class Config:
+        orm_mode = True
+
 class ReportBase(BaseModel):
     title: str
     description: str
-    status: str = "pending"
+    category: str
 
 class ReportCreate(ReportBase):
     pass
 
-class Report(ReportBase):
+class ReportInDB(ReportBase):
     id: int
+    status: str
+    admin_comments: Optional[str]
+    author_id: int
+    author_name: str
     created_at: datetime
-    updated_at: datetime
-    owner_id: int
-    attachments: List[str] = []
+    updated_at: Optional[datetime]
+    attachments: List[dict] = []
 
     class Config:
-        from_attributes = True
+        orm_mode = True
 
-# Database connection pool
-async def get_db():
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        yield conn
-    finally:
-        await conn.close()
+class AttachmentInDB(BaseModel):
+    id: int
+    name: str
+    type: str
+    size: int
+    url: str
+
+    class Config:
+        orm_mode = True
 
 # Utility functions
-def verify_password(plain_password: str, hashed_password: str):
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password: str):
+def get_password_hash(password):
     return pwd_context.hash(password)
 
-async def authenticate_user(email: str, password: str, db):
-    user = await db.fetchrow("SELECT * FROM users WHERE email = $1", email)
+def get_user(db: Session, email: str):
+    return db.query(User).filter(User.email == email).first()
+
+def authenticate_user(db: Session, email: str, password: str):
+    user = get_user(db, email)
     if not user:
         return False
-    if not verify_password(password, user.get("hashed_password")):  # Changed from "password" to "hashed_password"
+    if not verify_password(password, user.hashed_password):
         return False
     return user
 
@@ -117,7 +184,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db = Depends(get_db)):
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -132,292 +199,336 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db = Depends(get
     except JWTError:
         raise credentials_exception
     
-    user = await db.fetchrow("SELECT * FROM users WHERE email = $1", token_data.email)
+    user = get_user(db, email=token_data.email)
     if user is None:
         raise credentials_exception
+    
+    # Update last active time
+    user.last_active = datetime.utcnow()
+    db.commit()
+    
     return user
 
-async def get_current_active_user(current_user: User = Depends(get_current_user)):
-    if not current_user["is_active"]:
+async def get_current_active_user(current_user: UserInDB = Depends(get_current_user)):
+    if not current_user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
-async def check_admin(current_user: User = Depends(get_current_active_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+async def is_admin(current_user: UserInDB = Depends(get_current_active_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
-async def check_staff(current_user: User = Depends(get_current_active_user)):
-    if current_user["role"] not in ["admin", "staff"]:
-        raise HTTPException(status_code=403, detail="Staff access required")
-    return current_user
+# Initialize FastAPI app
+app = FastAPI(
+    title="ReportHub API",
+    description="A professional reporting system with user authentication and document attachments",
+    version="1.0.0"
+)
 
-# Initialize database tables
-async def initialize_database():
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        # Drop tables if they exist (for development only - remove in production)
-        await conn.execute('DROP TABLE IF EXISTS attachments CASCADE')
-        await conn.execute('DROP TABLE IF EXISTS reports CASCADE')
-        await conn.execute('DROP TABLE IF EXISTS users CASCADE')
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                email VARCHAR(255) UNIQUE NOT NULL,
-                hashed_password VARCHAR(255) NOT NULL,  -- Changed from "password" to "hashed_password"
-                full_name VARCHAR(255) NOT NULL,
-                is_active BOOLEAN DEFAULT TRUE,
-                role VARCHAR(50) DEFAULT 'staff',
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        ''')
-
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS reports (
-                id SERIAL PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                description TEXT NOT NULL,
-                status VARCHAR(50) DEFAULT 'pending',
-                owner_id INTEGER REFERENCES users(id),
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        ''')
-
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS attachments (
-                id SERIAL PRIMARY KEY,
-                report_id INTEGER REFERENCES reports(id),
-                file_path VARCHAR(255) NOT NULL,
-                original_filename VARCHAR(255) NOT NULL,
-                uploaded_at TIMESTAMP DEFAULT NOW()
-            )
-        ''')
-
-        # Create initial admin user if not exists
-        admin_email = "admin@reporting.com"
-        admin_exists = await conn.fetchrow("SELECT * FROM users WHERE email = $1", admin_email)
-        if not admin_exists:
-            hashed_password = get_password_hash("Admin@123")
-            await conn.execute('''
-                INSERT INTO users (email, hashed_password, full_name, role)
-                VALUES ($1, $2, $3, $4)
-            ''', admin_email, hashed_password, "Admin User", "admin")
-            
-    finally:
-        await conn.close()
-
-# Create attachments directory if it doesn't exist
-os.makedirs("attachments", exist_ok=True)
-
-# Serve static files (attachments)
-app.mount("/attachments", StaticFiles(directory="attachments"), name="attachments")
-
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    await initialize_database()
-
-# Authentication routes
-@app.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db = Depends(get_db)):
-    user = await authenticate_user(form_data.username, form_data.password, db)
+# Auth routes
+@app.post("/auth/login", response_model=Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(), 
+    db: Session = Depends(get_db)
+):
+    user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user["email"]}, expires_delta=access_token_expires
+        data={"sub": user.email}, expires_delta=access_token_expires
     )
+    
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.post("/register", response_model=User)
-async def register_user(user: UserCreate, db = Depends(get_db), admin: User = Depends(check_admin)):
-    existing_user = await db.fetchrow("SELECT * FROM users WHERE email = $1", user.email)
-    if existing_user:
+@app.get("/auth/me", response_model=UserInDB)
+async def read_users_me(current_user: UserInDB = Depends(get_current_active_user)):
+    return current_user
+
+# User routes
+@app.post("/users", response_model=UserInDB)
+async def create_user(
+    user: UserCreate, 
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
+):
+    db_user = get_user(db, email=user.email)
+    if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
     hashed_password = get_password_hash(user.password)
-    new_user = await db.fetchrow('''
-        INSERT INTO users (email, hashed_password, full_name, role)
-        VALUES ($1, $2, $3, 'staff')
-        RETURNING id, email, full_name, is_active, role
-    ''', user.email, hashed_password, user.full_name)
     
-    return new_user
+    db_user = User(
+        email=user.email,
+        name=user.name,
+        hashed_password=hashed_password,
+        role=user.role
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    return db_user
 
-# User routes
-@app.get("/users/me", response_model=User)
-async def read_users_me(current_user: User = Depends(get_current_active_user)):
-    return current_user
-
-@app.get("/users", response_model=List[User])
-async def read_users(db = Depends(get_db), admin: User = Depends(check_admin)):
-    users = await db.fetch("SELECT id, email, full_name, is_active, role FROM users")
+@app.get("/users", response_model=List[UserInDB])
+async def read_users(
+    skip: int = 0, 
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
+):
+    users = db.query(User).offset(skip).limit(limit).all()
     return users
 
+@app.get("/users/{user_id}", response_model=UserInDB)
+async def read_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
+):
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if db_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return db_user
+
+@app.delete("/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
+):
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if db_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    db.delete(db_user)
+    db.commit()
+    
+    return {"message": "User deleted successfully"}
+
 # Report routes
-@app.post("/reports", response_model=Report)
+@app.post("/reports", response_model=ReportInDB)
 async def create_report(
     title: str = Form(...),
     description: str = Form(...),
-    files: List[UploadFile] = File(None),
-    db = Depends(get_db),
-    current_user: User = Depends(check_staff)
+    category: str = Form(...),
+    attachments: List[UploadFile] = File([]),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     # Create report
-    report = await db.fetchrow('''
-        INSERT INTO reports (title, description, owner_id)
-        VALUES ($1, $2, $3)
-        RETURNING id, title, description, status, owner_id, created_at, updated_at
-    ''', title, description, current_user["id"])
+    db_report = Report(
+        title=title,
+        description=description,
+        category=category,
+        author_id=current_user.id
+    )
     
-    # Handle file attachments
-    attachment_paths = []
-    if files:
-        for file in files:
-            file_path = f"attachments/{report['id']}_{file.filename}"
-            with open(file_path, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
-            
-            await db.execute('''
-                INSERT INTO attachments (report_id, file_path, original_filename)
-                VALUES ($1, $2, $3)
-            ''', report["id"], file_path, file.filename)
-            
-            attachment_paths.append(file.filename)
+    db.add(db_report)
+    db.commit()
+    db.refresh(db_report)
     
-    return {**report, "attachments": attachment_paths}
+    # Handle attachments
+    saved_attachments = []
+    for attachment in attachments:
+        # Generate unique filename
+        file_ext = os.path.splitext(attachment.filename)[1]
+        filename = f"{uuid.uuid4()}{file_ext}"
+        
+        # In a real app, you would save the file to a storage service
+        # For this demo, we'll just store the filename
+        file_url = f"/attachments/{filename}"
+        
+        db_attachment = Attachment(
+            name=attachment.filename,
+            type=attachment.content_type,
+            size=attachment.size,
+            url=file_url,
+            report_id=db_report.id,
+            uploader_id=current_user.id
+        )
+        
+        db.add(db_attachment)
+        saved_attachments.append({
+            "id": db_attachment.id,
+            "name": db_attachment.name,
+            "type": db_attachment.type,
+            "size": db_attachment.size,
+            "url": db_attachment.url
+        })
+    
+    db.commit()
+    
+    # Add author name to response
+    report_data = db_report.__dict__
+    report_data["author_name"] = current_user.name
+    report_data["attachments"] = saved_attachments
+    
+    return report_data
 
-@app.get("/reports", response_model=List[Report])
+@app.get("/reports", response_model=List[ReportInDB])
 async def read_reports(
     skip: int = 0,
     limit: int = 100,
-    db = Depends(get_db),
-    current_user: User = Depends(check_staff)
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
-    if current_user["role"] == "admin":
-        reports = await db.fetch('''
-            SELECT r.*, array_agg(a.original_filename) as attachments
-            FROM reports r
-            LEFT JOIN attachments a ON r.id = a.report_id
-            GROUP BY r.id
-            ORDER BY r.created_at DESC
-            OFFSET $1 LIMIT $2
-        ''', skip, limit)
+    if current_user.role == "admin":
+        reports = db.query(Report).offset(skip).limit(limit).all()
     else:
-        reports = await db.fetch('''
-            SELECT r.*, array_agg(a.original_filename) as attachments
-            FROM reports r
-            LEFT JOIN attachments a ON r.id = a.report_id
-            WHERE r.owner_id = $3
-            GROUP BY r.id
-            ORDER BY r.created_at DESC
-            OFFSET $1 LIMIT $2
-        ''', skip, limit, current_user["id"])
+        reports = db.query(Report).filter(Report.author_id == current_user.id).offset(skip).limit(limit).all()
     
-    return reports
+    # Add author names and attachments to response
+    reports_data = []
+    for report in reports:
+        report_data = report.__dict__
+        author = db.query(User).filter(User.id == report.author_id).first()
+        report_data["author_name"] = author.name
+        
+        attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
+        report_data["attachments"] = [
+            {
+                "id": a.id,
+                "name": a.name,
+                "type": a.type,
+                "size": a.size,
+                "url": a.url
+            } for a in attachments
+        ]
+        
+        reports_data.append(report_data)
+    
+    return reports_data
 
-@app.get("/reports/{report_id}", response_model=Report)
-async def read_report(report_id: int, db = Depends(get_db), current_user: User = Depends(check_staff)):
-    report = await db.fetchrow('''
-        SELECT r.*, array_agg(a.original_filename) as attachments
-        FROM reports r
-        LEFT JOIN attachments a ON r.id = a.report_id
-        WHERE r.id = $1
-        GROUP BY r.id
-    ''', report_id)
-    
-    if not report:
+@app.get("/reports/{report_id}", response_model=ReportInDB)
+async def read_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    report = db.query(Report).filter(Report.id == report_id).first()
+    if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    if current_user["role"] != "admin" and report["owner_id"] != current_user["id"]:
+    # Check permissions
+    if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to access this report")
     
-    return report
+    # Add author name and attachments to response
+    report_data = report.__dict__
+    author = db.query(User).filter(User.id == report.author_id).first()
+    report_data["author_name"] = author.name
+    
+    attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
+    report_data["attachments"] = [
+        {
+            "id": a.id,
+            "name": a.name,
+            "type": a.type,
+            "size": a.size,
+            "url": a.url
+        } for a in attachments
+    ]
+    
+    return report_data
 
-@app.put("/reports/{report_id}", response_model=Report)
+@app.patch("/reports/{report_id}", response_model=ReportInDB)
 async def update_report(
     report_id: int,
-    title: str = Form(None),
-    description: str = Form(None),
-    status: str = Form(None),
-    files: List[UploadFile] = File(None),
-    db = Depends(get_db),
-    current_user: User = Depends(check_staff)
+    status: Optional[str] = None,
+    admin_comments: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
 ):
-    # Check if report exists and user has permission
-    report = await db.fetchrow("SELECT * FROM reports WHERE id = $1", report_id)
-    if not report:
+    report = db.query(Report).filter(Report.id == report_id).first()
+    if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    if current_user["role"] != "admin" and report["owner_id"] != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Not authorized to update this report")
+    if status is not None:
+        report.status = status
+    if admin_comments is not None:
+        report.admin_comments = admin_comments
     
-    # Build update query
-    update_fields = {}
-    if title is not None:
-        update_fields["title"] = title
-    if description is not None:
-        update_fields["description"] = description
-    if status is not None and current_user["role"] == "admin":
-        update_fields["status"] = status
+    db.commit()
+    db.refresh(report)
     
-    if update_fields:
-        set_clause = ", ".join([f"{field} = ${i+2}" for i, field in enumerate(update_fields.keys())])
-        query = f"UPDATE reports SET {set_clause}, updated_at = NOW() WHERE id = $1 RETURNING *"
-        report = await db.fetchrow(query, report_id, *update_fields.values())
+    # Add author name and attachments to response
+    report_data = report.__dict__
+    author = db.query(User).filter(User.id == report.author_id).first()
+    report_data["author_name"] = author.name
     
-    # Handle file attachments
-    attachment_paths = []
-    if files:
-        for file in files:
-            file_path = f"attachments/{report_id}_{file.filename}"
-            with open(file_path, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
-            
-            await db.execute('''
-                INSERT INTO attachments (report_id, file_path, original_filename)
-                VALUES ($1, $2, $3)
-            ''', report_id, file_path, file.filename)
-            
-            attachment_paths.append(file.filename)
+    attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
+    report_data["attachments"] = [
+        {
+            "id": a.id,
+            "name": a.name,
+            "type": a.type,
+            "size": a.size,
+            "url": a.url
+        } for a in attachments
+    ]
     
-    # Get all attachments for the report
-    attachments = await db.fetch("SELECT original_filename FROM attachments WHERE report_id = $1", report_id)
-    attachment_names = [a["original_filename"] for a in attachments]
-    
-    return {**report, "attachments": attachment_names}
+    return report_data
 
 @app.delete("/reports/{report_id}")
-async def delete_report(report_id: int, db = Depends(get_db), current_user: User = Depends(check_staff)):
-    report = await db.fetchrow("SELECT * FROM reports WHERE id = $1", report_id)
-    if not report:
+async def delete_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    report = db.query(Report).filter(Report.id == report_id).first()
+    if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    if current_user["role"] != "admin" and report["owner_id"] != current_user["id"]:
+    # Check permissions
+    if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this report")
     
     # Delete attachments first
-    attachments = await db.fetch("SELECT file_path FROM attachments WHERE report_id = $1", report_id)
-    for attachment in attachments:
-        try:
-            os.remove(attachment["file_path"])
-        except:
-            pass
+    db.query(Attachment).filter(Attachment.report_id == report_id).delete()
     
-    await db.execute("DELETE FROM attachments WHERE report_id = $1", report_id)
-    await db.execute("DELETE FROM reports WHERE id = $1", report_id)
+    # Then delete the report
+    db.delete(report)
+    db.commit()
     
     return {"message": "Report deleted successfully"}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Initialize default admin user
+def init_default_admin():
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.email == "admin@reporthub.com").first()
+        if not admin:
+            hashed_password = get_password_hash("Admin123!")
+            admin = User(
+                name="Admin User",
+                email="admin@reporthub.com",
+                hashed_password=hashed_password,
+                role="admin"
+            )
+            db.add(admin)
+            db.commit()
+    finally:
+        db.close()
+
+# Call the function to create default admin when starting up
+init_default_admin()
