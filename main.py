@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import func
 
 # Database configuration
-DATABASE_URL = "postgresql://inventory_ihpg_user:EKkxYBPqllVfkTkIDKYRzGKDX5Vw2ek@dpg-d16jkimmcj7s73c7li80-a/inventory_ihpg"
+DATABASE_URL = "postgresql://inventory_ihpg_user:EKkxYBPqllVfkTkIDKYRzGZKDX5Vw2ek@dpg-d16jkimmcj7s73c7li80-a/inventory_ihpg"
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
