@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, F
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, validator
 from typing import List, Optional
 from datetime import datetime, timedelta
@@ -10,8 +9,6 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
 import uuid
-import shutil
-from pathlib import Path
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
@@ -28,22 +25,6 @@ Base = declarative_base()
 SECRET_KEY = "your-secret-key-here"  # In production, use a proper secret key from environment variables
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# File storage configuration
-ATTACHMENTS_DIR = "attachments"
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-ALLOWED_FILE_TYPES = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "application/pdf": ".pdf",
-    "application/msword": ".doc",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-    "application/vnd.ms-excel": ".xls",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-}
-
-# Create attachments directory if it doesn't exist
-Path(ATTACHMENTS_DIR).mkdir(exist_ok=True)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -369,35 +350,12 @@ async def create_report(
     # Handle attachments
     saved_attachments = []
     for attachment in attachments:
-        # Validate file type
-        if attachment.content_type not in ALLOWED_FILE_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File type {attachment.content_type} not allowed"
-            )
-        
-        # Validate file size
-        if attachment.size > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File {attachment.filename} is too large (max {MAX_FILE_SIZE/1024/1024}MB)"
-            )
-        
-        # Generate unique filename with correct extension
-        file_ext = ALLOWED_FILE_TYPES[attachment.content_type]
+        # Generate unique filename
+        file_ext = os.path.splitext(attachment.filename)[1]
         filename = f"{uuid.uuid4()}{file_ext}"
-        file_path = Path(ATTACHMENTS_DIR) / filename
         
-        # Save file to disk
-        try:
-            with file_path.open("wb") as buffer:
-                shutil.copyfileobj(attachment.file, buffer)
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to save file {attachment.filename}: {str(e)}"
-            )
-        
+        # In a real app, you would save the file to a storage service
+        # For this demo, we'll just store the filename
         file_url = f"/attachments/{filename}"
         
         db_attachment = Attachment(
@@ -545,20 +503,7 @@ async def delete_report(
     if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this report")
     
-    # Get all attachments first
-    attachments = db.query(Attachment).filter(Attachment.report_id == report_id).all()
-    
-    # Delete files from disk
-    for attachment in attachments:
-        try:
-            filename = attachment.url.split("/")[-1]
-            file_path = Path(ATTACHMENTS_DIR) / filename
-            if file_path.exists():
-                file_path.unlink()
-        except Exception as e:
-            print(f"Failed to delete file {attachment.url}: {str(e)}")
-    
-    # Delete attachments from database
+    # Delete attachments first
     db.query(Attachment).filter(Attachment.report_id == report_id).delete()
     
     # Then delete the report
@@ -566,42 +511,6 @@ async def delete_report(
     db.commit()
     
     return {"message": "Report deleted successfully"}
-
-# Attachment routes
-@app.get("/attachments/{filename}")
-async def download_attachment(
-    filename: str,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    # Security check to prevent directory traversal
-    if ".." in filename or "/" in filename or "\\" in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    
-    file_path = Path(ATTACHMENTS_DIR) / filename
-    
-    # Check if file exists
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Check if user has permission to access this file
-    attachment = db.query(Attachment).filter(Attachment.url == f"/attachments/{filename}").first()
-    if not attachment:
-        raise HTTPException(status_code=404, detail="File record not found")
-    
-    # Check if user is admin or the report author
-    report = db.query(Report).filter(Report.id == attachment.report_id).first()
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    
-    if current_user.role != "admin" and report.author_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this file")
-    
-    return FileResponse(
-        file_path,
-        filename=attachment.name,
-        media_type=attachment.type
-    )
 
 # Initialize default admin user
 def init_default_admin():
