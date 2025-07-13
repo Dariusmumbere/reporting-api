@@ -7,6 +7,9 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+import shutil
+from pathlib import Path
+from fastapi.responses import FileResponse
 import os
 import uuid
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
@@ -28,6 +31,22 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# Configuration
+ATTACHMENTS_DIR = "attachments"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_FILE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "application/pdf": ".pdf",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+}
+
+# Create attachments directory if it doesn't exist
+Path(ATTACHMENTS_DIR).mkdir(exist_ok=True)
 
 # Models
 class User(Base):
@@ -350,12 +369,35 @@ async def create_report(
     # Handle attachments
     saved_attachments = []
     for attachment in attachments:
-        # Generate unique filename
-        file_ext = os.path.splitext(attachment.filename)[1]
-        filename = f"{uuid.uuid4()}{file_ext}"
+        # Validate file type
+        if attachment.content_type not in ALLOWED_FILE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type {attachment.content_type} not allowed"
+            )
         
-        # In a real app, you would save the file to a storage service
-        # For this demo, we'll just store the filename
+        # Validate file size
+        if attachment.size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File {attachment.filename} is too large (max {MAX_FILE_SIZE/1024/1024}MB)"
+            )
+        
+        # Generate unique filename with correct extension
+        file_ext = ALLOWED_FILE_TYPES[attachment.content_type]
+        filename = f"{uuid.uuid4()}{file_ext}"
+        file_path = Path(ATTACHMENTS_DIR) / filename
+        
+        # Save file to disk
+        try:
+            with file_path.open("wb") as buffer:
+                shutil.copyfileobj(attachment.file, buffer)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save file {attachment.filename}: {str(e)}"
+            )
+        
         file_url = f"/attachments/{filename}"
         
         db_attachment = Attachment(
@@ -384,7 +426,6 @@ async def create_report(
     report_data["attachments"] = saved_attachments
     
     return report_data
-
 @app.get("/reports", response_model=List[ReportInDB])
 async def read_reports(
     skip: int = 0,
@@ -511,6 +552,42 @@ async def delete_report(
     db.commit()
     
     return {"message": "Report deleted successfully"}
+
+@app.get("/attachments/{filename}")
+async def download_attachment(
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Security check to prevent directory traversal
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    file_path = Path(ATTACHMENTS_DIR) / filename
+    
+    # Check if file exists
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Check if user has permission to access this file
+    attachment = db.query(Attachment).filter(Attachment.url == f"/attachments/{filename}").first()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="File record not found")
+    
+    # Check if user is admin or the report author
+    report = db.query(Report).filter(Report.id == attachment.report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    if current_user.role != "admin" and report.author_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this file")
+    
+    return FileResponse(
+        file_path,
+        filename=attachment.name,
+        media_type=attachment.type
+    )
+
 
 # Initialize default admin user
 def init_default_admin():
