@@ -149,6 +149,10 @@ class AttachmentInDB(BaseModel):
     class Config:
         orm_mode = True
 
+class ReportStatusUpdate(BaseModel):
+    status: str
+    admin_comments: Optional[str] = None
+
 # Utility functions
 def get_db():
     db = SessionLocal()
@@ -511,6 +515,42 @@ async def delete_report(
     db.commit()
     
     return {"message": "Report deleted successfully"}
+
+@app.patch("/reports/{report_id}/status", response_model=ReportInDB)
+async def update_report_status(
+    report_id: int,
+    status_update: ReportStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
+):
+    report = db.query(Report).filter(Report.id == report_id).first()
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Update status and comments
+    report.status = status_update.status
+    report.admin_comments = status_update.admin_comments
+    
+    db.commit()
+    db.refresh(report)
+    
+    # Add author name and attachments to response
+    report_data = report.__dict__
+    author = db.query(User).filter(User.id == report.author_id).first()
+    report_data["author_name"] = author.name
+    
+    attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
+    report_data["attachments"] = [
+        {
+            "id": a.id,
+            "name": a.name,
+            "type": a.type,
+            "size": a.size,
+            "url": a.url
+        } for a in attachments
+    ]
+    
+    return report_data
 
 # Initialize default admin user
 def init_default_admin():
