@@ -3,6 +3,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, validator
+from fastapi.responses import FileResponse
 from typing import List, Optional
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
@@ -28,6 +29,13 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# Create attachments directory if it doesn't exist
+ATTACHMENTS_DIR = "attachments"
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+
+# Mount static files directory for attachments
+app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
 
 # Models
 class User(Base):
@@ -357,9 +365,12 @@ async def create_report(
         # Generate unique filename
         file_ext = os.path.splitext(attachment.filename)[1]
         filename = f"{uuid.uuid4()}{file_ext}"
+        file_path = os.path.join(ATTACHMENTS_DIR, filename)
         
-        # In a real app, you would save the file to a storage service
-        # For this demo, we'll just store the filename
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            buffer.write(await attachment.read())
+        
         file_url = f"/attachments/{filename}"
         
         db_attachment = Attachment(
@@ -551,6 +562,36 @@ async def update_report_status(
     ]
     
     return report_data
+
+@app.get("/download/{filename}")
+async def download_file(
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Verify the file exists and the user has access to it
+    file_path = os.path.join(ATTACHMENTS_DIR, filename)
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Check if user has access to this file (either admin or owner of the report)
+    attachment = db.query(Attachment).filter(Attachment.url == f"/attachments/{filename}").first()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="File record not found")
+    
+    if current_user.role != "admin":
+        report = db.query(Report).filter(Report.id == attachment.report_id).first()
+        if not report or report.author_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this file")
+    
+    # Return the file with the original filename
+    return FileResponse(
+        file_path,
+        filename=attachment.name,
+        media_type=attachment.type
+    )
 
 # Initialize default admin user
 def init_default_admin():
