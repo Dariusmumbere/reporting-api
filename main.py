@@ -164,6 +164,35 @@ class ReportStatusUpdate(BaseModel):
     status: str
     admin_comments: Optional[str] = None
 
+class OrganizationBase(BaseModel):
+    name: str
+    type: str
+    size: Optional[str] = "1-10"
+
+class OrganizationCreate(OrganizationBase):
+    pass
+
+class OrganizationInDB(OrganizationBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+# Add this table model
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)
+    size = Column(String, default="1-10")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"))
+
+    creator = relationship("User")
+
+
 # Utility functions
 def get_db():
     db = SessionLocal()
@@ -565,6 +594,64 @@ async def update_report_status(
     ]
     
     return report_data
+
+@app.post("/auth/signup", response_model=UserInDB)
+async def signup_user(
+    user: UserCreate,
+    org: Optional[OrganizationCreate] = None,
+    db: Session = Depends(get_db)
+):
+    # Check if email exists
+    db_user = get_user(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Hash password
+    hashed_password = get_password_hash(user.password)
+    
+    # Check if this is the first user (will be admin)
+    is_first_user = db.query(User).count() == 0
+    user_role = "admin" if is_first_user else "staff"
+    
+    # Create user
+    db_user = User(
+        email=user.email,
+        name=user.name,
+        hashed_password=hashed_password,
+        role=user_role
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # If this is the first user and org data is provided, create organization
+    if is_first_user and org:
+        db_org = Organization(
+            name=org.name,
+            type=org.type,
+            size=org.size,
+            created_by=db_user.id
+        )
+        
+        db.add(db_org)
+        db.commit()
+        db.refresh(db_org)
+    
+    return db_user
+
+@app.get("/organizations", response_model=List[OrganizationInDB])
+async def read_organizations(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    orgs = db.query(Organization).offset(skip).limit(limit).all()
+    return orgs
 
 @app.get("/download/{filename}")
 async def download_file(
