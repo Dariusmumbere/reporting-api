@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, validator
 from fastapi.responses import FileResponse
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -163,35 +163,6 @@ class AttachmentInDB(BaseModel):
 class ReportStatusUpdate(BaseModel):
     status: str
     admin_comments: Optional[str] = None
-
-class OrganizationBase(BaseModel):
-    name: str
-    type: str
-    size: Optional[str] = "1-10"
-
-class OrganizationCreate(OrganizationBase):
-    pass
-
-class OrganizationInDB(OrganizationBase):
-    id: int
-    created_at: datetime
-
-    class Config:
-        orm_mode = True
-
-# Add this table model
-class Organization(Base):
-    __tablename__ = "organizations"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    type = Column(String, nullable=False)
-    size = Column(String, default="1-10")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    created_by = Column(Integer, ForeignKey("users.id"))
-
-    creator = relationship("User")
-
 
 # Utility functions
 def get_db():
@@ -595,63 +566,67 @@ async def update_report_status(
     
     return report_data
 
-@app.post("/auth/signup", response_model=UserInDB)
+@app.get("/auth/first-user")
+async def check_first_user(db: Session = Depends(get_db)):
+    user_count = db.query(User).count()
+    return {"is_first_user": user_count == 0}
+
+@app.post("/auth/signup", response_model=Dict)
 async def signup_user(
-    user: UserCreate,
-    org: Optional[OrganizationCreate] = None,
+    user_data: Dict,
     db: Session = Depends(get_db)
 ):
-    # Check if email exists
-    db_user = get_user(db, email=user.email)
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    # Check if email already exists
+    existing_user = get_user(db, user_data.get("email"))
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
     
-    # Hash password
-    hashed_password = get_password_hash(user.password)
-    
-    # Check if this is the first user (will be admin)
+    # Check if this is the first user
     is_first_user = db.query(User).count() == 0
-    user_role = "admin" if is_first_user else "staff"
     
     # Create user
+    hashed_password = get_password_hash(user_data.get("password"))
+    role = "admin" if is_first_user else "staff"
+    
     db_user = User(
-        email=user.email,
-        name=user.name,
+        email=user_data.get("email"),
+        name=user_data.get("name"),
         hashed_password=hashed_password,
-        role=user_role
+        role=role
     )
     
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     
-    # If this is the first user and org data is provided, create organization
-    if is_first_user and org:
-        db_org = Organization(
-            name=org.name,
-            type=org.type,
-            size=org.size,
-            created_by=db_user.id
-        )
-        
-        db.add(db_org)
-        db.commit()
-        db.refresh(db_org)
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": db_user.email}, expires_delta=access_token_expires
+    )
     
-    return db_user
-
-@app.get("/organizations", response_model=List[OrganizationInDB])
-async def read_organizations(
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Not authorized")
+    # Prepare response
+    response_data = {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": db_user.id,
+            "name": db_user.name,
+            "email": db_user.email,
+            "role": db_user.role
+        }
+    }
     
-    orgs = db.query(Organization).offset(skip).limit(limit).all()
-    return orgs
+    # If this is the first user, include organization name in response
+    if is_first_user and user_data.get("organization"):
+        response_data["organization"] = user_data.get("organization")
+        # Here you would typically store the org name in your database
+        # For now we'll just return it in the response
+    
+    return response_data
 
 @app.get("/download/{filename}")
 async def download_file(
