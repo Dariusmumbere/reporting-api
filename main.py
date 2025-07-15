@@ -41,6 +41,16 @@ os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
 
 # Models
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    users = relationship("User", back_populates="organization")
+    reports = relationship("Report", back_populates="organization")
+
 class User(Base):
     __tablename__ = "users"
 
@@ -52,7 +62,9 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_active = Column(DateTime(timezone=True))
+    organization_id = Column(Integer, ForeignKey("organizations.id"))
 
+    organization = relationship("Organization", back_populates="users")
     reports = relationship("Report", back_populates="author")
     attachments = relationship("Attachment", back_populates="uploader")
 
@@ -66,10 +78,12 @@ class Report(Base):
     status = Column(String, default="pending", nullable=False)
     admin_comments = Column(String)
     author_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     author = relationship("User", back_populates="reports")
+    organization = relationship("Organization", back_populates="reports")
     attachments = relationship("Attachment", back_populates="report")
 
 class Attachment(Base):
@@ -93,6 +107,7 @@ Base.metadata.create_all(bind=engine)
 class Token(BaseModel):
     access_token: str
     token_type: str
+    organization: Optional[str] = None
 
 class TokenData(BaseModel):
     email: Optional[str] = None
@@ -104,6 +119,7 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
     role: str = "staff"
+    organization: Optional[str] = None
 
     @validator('password')
     def password_complexity(cls, v):
@@ -125,6 +141,7 @@ class UserInDB(UserBase):
     is_active: bool
     created_at: datetime
     last_active: Optional[datetime]
+    organization: Optional[str]
 
     class Config:
         orm_mode = True
@@ -143,6 +160,7 @@ class ReportInDB(ReportBase):
     admin_comments: Optional[str]
     author_id: int
     author_name: str
+    organization_id: int
     created_at: datetime
     updated_at: Optional[datetime]
     attachments: List[dict] = []
@@ -269,7 +287,10 @@ async def login_for_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     
-    return {"access_token": access_token, "token_type": "bearer"}
+    # Get organization name if exists
+    org_name = user.organization.name if user.organization else None
+    
+    return {"access_token": access_token, "token_type": "bearer", "organization": org_name}
 
 @app.get("/auth/me", response_model=UserInDB)
 async def read_users_me(current_user: UserInDB = Depends(get_current_active_user)):
@@ -288,11 +309,22 @@ async def create_user(
     
     hashed_password = get_password_hash(user.password)
     
+    # Get or create organization
+    organization = None
+    if user.organization:
+        organization = db.query(Organization).filter(Organization.name == user.organization).first()
+        if not organization:
+            organization = Organization(name=user.organization)
+            db.add(organization)
+            db.commit()
+            db.refresh(organization)
+    
     db_user = User(
         email=user.email,
         name=user.name,
         hashed_password=hashed_password,
-        role=user.role
+        role=user.role,
+        organization_id=organization.id if organization else None
     )
     
     db.add(db_user)
@@ -308,7 +340,9 @@ async def read_users(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    users = db.query(User).offset(skip).limit(limit).all()
+    # Only show users from the same organization
+    query = db.query(User).filter(User.organization_id == current_user.organization_id)
+    users = query.offset(skip).limit(limit).all()
     return users
 
 @app.get("/users/{user_id}", response_model=UserInDB)
@@ -317,7 +351,7 @@ async def read_user(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    db_user = db.query(User).filter(User.id == user_id).first()
+    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return db_user
@@ -331,7 +365,7 @@ async def delete_user(
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     
-    db_user = db.query(User).filter(User.id == user_id).first()
+    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -350,12 +384,16 @@ async def create_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    if not current_user.organization_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to create reports")
+    
     # Create report
     db_report = Report(
         title=title,
         description=description,
         category=category,
-        author_id=current_user.id
+        author_id=current_user.id,
+        organization_id=current_user.organization_id
     )
     
     db.add(db_report)
@@ -410,10 +448,13 @@ async def read_reports(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    if current_user.role == "admin":
-        reports = db.query(Report).offset(skip).limit(limit).all()
-    else:
-        reports = db.query(Report).filter(Report.author_id == current_user.id).offset(skip).limit(limit).all()
+    # Only show reports from the same organization
+    query = db.query(Report).filter(Report.organization_id == current_user.organization_id)
+    
+    if current_user.role != "admin":
+        query = query.filter(Report.author_id == current_user.id)
+    
+    reports = query.offset(skip).limit(limit).all()
     
     # Add author names and attachments to response
     reports_data = []
@@ -443,7 +484,11 @@ async def read_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
@@ -477,7 +522,11 @@ async def update_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
@@ -513,7 +562,11 @@ async def delete_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
@@ -537,7 +590,11 @@ async def update_report_status(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
@@ -571,13 +628,16 @@ async def check_first_user(db: Session = Depends(get_db)):
     user_count = db.query(User).count()
     return {"is_first_user": user_count == 0}
 
-@app.post("/auth/signup", response_model=Dict)
+@app.post("/auth/signup", response_model=Token)
 async def signup_user(
-    user_data: Dict,
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    organization: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     # Check if email already exists
-    existing_user = get_user(db, user_data.get("email"))
+    existing_user = get_user(db, email)
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -587,15 +647,48 @@ async def signup_user(
     # Check if this is the first user
     is_first_user = db.query(User).count() == 0
     
+    # First user must provide organization name
+    if is_first_user and not organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization name is required for the first user"
+        )
+    
+    # Create organization if this is the first user
+    org = None
+    if is_first_user and organization:
+        # Check if organization name already exists
+        existing_org = db.query(Organization).filter(Organization.name == organization).first()
+        if existing_org:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization name already exists"
+            )
+        
+        org = Organization(name=organization)
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+    
+    # For subsequent users, find their organization
+    if not is_first_user and organization:
+        org = db.query(Organization).filter(Organization.name == organization).first()
+        if not org:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization not found"
+            )
+    
     # Create user
-    hashed_password = get_password_hash(user_data.get("password"))
+    hashed_password = get_password_hash(password)
     role = "admin" if is_first_user else "staff"
     
     db_user = User(
-        email=user_data.get("email"),
-        name=user_data.get("name"),
+        email=email,
+        name=name,
         hashed_password=hashed_password,
-        role=role
+        role=role,
+        organization_id=org.id if org else None
     )
     
     db.add(db_user)
@@ -612,19 +705,8 @@ async def signup_user(
     response_data = {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {
-            "id": db_user.id,
-            "name": db_user.name,
-            "email": db_user.email,
-            "role": db_user.role
-        }
+        "organization": org.name if org else None
     }
-    
-    # If this is the first user, include organization name in response
-    if is_first_user and user_data.get("organization"):
-        response_data["organization"] = user_data.get("organization")
-        # Here you would typically store the org name in your database
-        # For now we'll just return it in the response
     
     return response_data
 
@@ -646,10 +728,17 @@ async def download_file(
     if not attachment:
         raise HTTPException(status_code=404, detail="File record not found")
     
-    if current_user.role != "admin":
-        report = db.query(Report).filter(Report.id == attachment.report_id).first()
-        if not report or report.author_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Not authorized to access this file")
+    # Check if the report belongs to the same organization
+    report = db.query(Report).filter(
+        Report.id == attachment.report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
+    if not report:
+        raise HTTPException(status_code=403, detail="Not authorized to access this file")
+    
+    if current_user.role != "admin" and report.author_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this file")
     
     # Return the file with the original filename
     return FileResponse(
@@ -662,14 +751,23 @@ async def download_file(
 def init_default_admin():
     db = SessionLocal()
     try:
+        # Check if there's already an admin
         admin = db.query(User).filter(User.email == "admin@reporthub.com").first()
         if not admin:
+            # Create default organization
+            org = Organization(name="Default Organization")
+            db.add(org)
+            db.commit()
+            db.refresh(org)
+            
+            # Create admin user
             hashed_password = get_password_hash("Admin123!")
             admin = User(
                 name="Admin User",
                 email="admin@reporthub.com",
                 hashed_password=hashed_password,
-                role="admin"
+                role="admin",
+                organization_id=org.id
             )
             db.add(admin)
             db.commit()
