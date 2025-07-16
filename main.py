@@ -11,10 +11,11 @@ from passlib.context import CryptContext
 import os
 import uuid
 from fastapi import FastAPI
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import func
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 # Database configuration
 DATABASE_URL = "postgresql://reporting_wlcd_user:sYC2WmtyjDCjyxvCPjoRNYAH4OCpVp6L@dpg-d1p23rc9c44c738581ig-a/reporting_wlcd"
@@ -100,8 +101,28 @@ class Attachment(Base):
     report = relationship("Report", back_populates="attachments")
     uploader = relationship("User", back_populates="attachments")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+def check_and_create_tables():
+    db = SessionLocal()
+    try:
+        # Check if users table exists and has organization_id column
+        db.execute(text("SELECT 1 FROM users LIMIT 1"))
+        
+        try:
+            # Check if organization_id column exists
+            db.execute(text("SELECT organization_id FROM users LIMIT 1"))
+        except (OperationalError, ProgrammingError):
+            # Add the column if it doesn't exist
+            db.execute(text("ALTER TABLE users ADD COLUMN organization_id INTEGER REFERENCES organizations(id)"))
+            db.commit()
+            
+    except (OperationalError, ProgrammingError):
+        # Tables don't exist, create them
+        Base.metadata.create_all(bind=engine)
+    finally:
+        db.close()
+
+# Check and create tables if needed
+check_and_create_tables()
 
 # Pydantic models
 class Token(BaseModel):
@@ -144,7 +165,7 @@ class UserInDB(UserBase):
     organization: Optional[str]
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class ReportBase(BaseModel):
     title: str
@@ -166,7 +187,7 @@ class ReportInDB(ReportBase):
     attachments: List[dict] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class AttachmentInDB(BaseModel):
     id: int
@@ -176,7 +197,7 @@ class AttachmentInDB(BaseModel):
     url: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class ReportStatusUpdate(BaseModel):
     status: str
@@ -754,23 +775,27 @@ def init_default_admin():
         # Check if there's already an admin
         admin = db.query(User).filter(User.email == "admin@reporthub.com").first()
         if not admin:
-            # Create default organization
-            org = Organization(name="Default Organization")
-            db.add(org)
-            db.commit()
-            db.refresh(org)
-            
-            # Create admin user
-            hashed_password = get_password_hash("Admin123!")
-            admin = User(
-                name="Admin User",
-                email="admin@reporthub.com",
-                hashed_password=hashed_password,
-                role="admin",
-                organization_id=org.id
-            )
-            db.add(admin)
-            db.commit()
+            try:
+                # Create default organization
+                org = Organization(name="Default Organization")
+                db.add(org)
+                db.commit()
+                db.refresh(org)
+                
+                # Create admin user
+                hashed_password = get_password_hash("Admin123!")
+                admin = User(
+                    name="Admin User",
+                    email="admin@reporthub.com",
+                    hashed_password=hashed_password,
+                    role="admin",
+                    organization_id=org.id
+                )
+                db.add(admin)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                print(f"Error creating default admin: {e}")
     finally:
         db.close()
 
