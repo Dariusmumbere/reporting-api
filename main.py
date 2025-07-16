@@ -11,11 +11,10 @@ from passlib.context import CryptContext
 import os
 import uuid
 from fastapi import FastAPI
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, text
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import func
-from sqlalchemy.exc import OperationalError, ProgrammingError
 
 # Database configuration
 DATABASE_URL = "postgresql://reporting_wlcd_user:sYC2WmtyjDCjyxvCPjoRNYAH4OCpVp6L@dpg-d1p23rc9c44c738581ig-a/reporting_wlcd"
@@ -25,7 +24,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Security configuration
-SECRET_KEY = "your-secret-key-here"  # In production, use a proper secret key from environment variables
+SECRET_KEY = "your-secret-key-here"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -101,28 +100,8 @@ class Attachment(Base):
     report = relationship("Report", back_populates="attachments")
     uploader = relationship("User", back_populates="attachments")
 
-def check_and_create_tables():
-    db = SessionLocal()
-    try:
-        # Check if users table exists and has organization_id column
-        db.execute(text("SELECT 1 FROM users LIMIT 1"))
-        
-        try:
-            # Check if organization_id column exists
-            db.execute(text("SELECT organization_id FROM users LIMIT 1"))
-        except (OperationalError, ProgrammingError):
-            # Add the column if it doesn't exist
-            db.execute(text("ALTER TABLE users ADD COLUMN organization_id INTEGER REFERENCES organizations(id)"))
-            db.commit()
-            
-    except (OperationalError, ProgrammingError):
-        # Tables don't exist, create them
-        Base.metadata.create_all(bind=engine)
-    finally:
-        db.close()
-
-# Check and create tables if needed
-check_and_create_tables()
+# Create tables
+Base.metadata.create_all(bind=engine)
 
 # Pydantic models
 class Token(BaseModel):
@@ -162,10 +141,11 @@ class UserInDB(UserBase):
     is_active: bool
     created_at: datetime
     last_active: Optional[datetime]
-    organization: Optional[str]
+    organization_id: Optional[int]
+    organization_name: Optional[str]
 
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 class ReportBase(BaseModel):
     title: str
@@ -182,12 +162,13 @@ class ReportInDB(ReportBase):
     author_id: int
     author_name: str
     organization_id: int
+    organization_name: str
     created_at: datetime
     updated_at: Optional[datetime]
     attachments: List[dict] = []
 
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 class AttachmentInDB(BaseModel):
     id: int
@@ -197,7 +178,7 @@ class AttachmentInDB(BaseModel):
     url: str
 
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 class ReportStatusUpdate(BaseModel):
     status: str
@@ -273,6 +254,16 @@ async def is_admin(current_user: UserInDB = Depends(get_current_active_user)):
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
+def create_organization(db: Session, name: str):
+    org = Organization(name=name)
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+    return org
+
+def get_organization_by_name(db: Session, name: str):
+    return db.query(Organization).filter(Organization.name == name).first()
+
 # Initialize FastAPI app
 app = FastAPI(
     title="ReportHub API",
@@ -308,14 +299,107 @@ async def login_for_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     
-    # Get organization name if exists
-    org_name = user.organization.name if user.organization else None
+    response_data = {
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
     
-    return {"access_token": access_token, "token_type": "bearer", "organization": org_name}
+    if user.organization:
+        response_data["organization"] = user.organization.name
+    
+    return response_data
 
 @app.get("/auth/me", response_model=UserInDB)
 async def read_users_me(current_user: UserInDB = Depends(get_current_active_user)):
-    return current_user
+    user_data = current_user.__dict__
+    if current_user.organization:
+        user_data["organization_name"] = current_user.organization.name
+    return user_data
+
+@app.get("/auth/first-user")
+async def check_first_user(db: Session = Depends(get_db)):
+    user_count = db.query(User).count()
+    return {"is_first_user": user_count == 0}
+
+@app.post("/auth/signup", response_model=Token)
+async def signup_user(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    organization: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    # Check if email already exists
+    existing_user = get_user(db, email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Check if this is the first user
+    is_first_user = db.query(User).count() == 0
+    
+    # If this is the first user, organization name is required
+    if is_first_user and not organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization name is required for the first user"
+        )
+    
+    # Create organization if this is the first user
+    org = None
+    if is_first_user:
+        org = get_organization_by_name(db, organization)
+        if not org:
+            org = create_organization(db, organization)
+    
+    # For subsequent users, get their organization from the email domain or other logic
+    # For now, we'll require organization name for all signups
+    if not is_first_user and not organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization name is required"
+        )
+    
+    if not is_first_user:
+        org = get_organization_by_name(db, organization)
+        if not org:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization not found"
+            )
+    
+    # Create user
+    hashed_password = get_password_hash(password)
+    role = "admin" if is_first_user else "staff"
+    
+    db_user = User(
+        email=email,
+        name=name,
+        hashed_password=hashed_password,
+        role=role,
+        organization_id=org.id
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": db_user.email}, expires_delta=access_token_expires
+    )
+    
+    # Prepare response
+    response_data = {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "organization": org.name
+    }
+    
+    return response_data
 
 # User routes
 @app.post("/users", response_model=UserInDB)
@@ -328,24 +412,24 @@ async def create_user(
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    hashed_password = get_password_hash(user.password)
-    
-    # Get or create organization
-    organization = None
+    # Validate organization
+    org = None
     if user.organization:
-        organization = db.query(Organization).filter(Organization.name == user.organization).first()
-        if not organization:
-            organization = Organization(name=user.organization)
-            db.add(organization)
-            db.commit()
-            db.refresh(organization)
+        org = get_organization_by_name(db, user.organization)
+        if not org:
+            raise HTTPException(
+                status_code=400,
+                detail="Organization not found"
+            )
+    
+    hashed_password = get_password_hash(user.password)
     
     db_user = User(
         email=user.email,
         name=user.name,
         hashed_password=hashed_password,
         role=user.role,
-        organization_id=organization.id if organization else None
+        organization_id=org.id if org else current_user.organization_id
     )
     
     db.add(db_user)
@@ -362,9 +446,17 @@ async def read_users(
     current_user: UserInDB = Depends(is_admin)
 ):
     # Only show users from the same organization
-    query = db.query(User).filter(User.organization_id == current_user.organization_id)
-    users = query.offset(skip).limit(limit).all()
-    return users
+    users = db.query(User).filter(User.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
+    
+    # Add organization name to each user
+    users_data = []
+    for user in users:
+        user_data = user.__dict__
+        if user.organization:
+            user_data["organization_name"] = user.organization.name
+        users_data.append(user_data)
+    
+    return users_data
 
 @app.get("/users/{user_id}", response_model=UserInDB)
 async def read_user(
@@ -372,10 +464,19 @@ async def read_user(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
+    db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return db_user
+    
+    # Verify user is from the same organization
+    if db_user.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this user")
+    
+    user_data = db_user.__dict__
+    if db_user.organization:
+        user_data["organization_name"] = db_user.organization.name
+    
+    return user_data
 
 @app.delete("/users/{user_id}")
 async def delete_user(
@@ -386,9 +487,13 @@ async def delete_user(
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     
-    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
+    db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    # Verify user is from the same organization
+    if db_user.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this user")
     
     db.delete(db_user)
     db.commit()
@@ -405,9 +510,6 @@ async def create_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    if not current_user.organization_id:
-        raise HTTPException(status_code=400, detail="User must belong to an organization to create reports")
-    
     # Create report
     db_report = Report(
         title=title,
@@ -455,9 +557,10 @@ async def create_report(
     
     db.commit()
     
-    # Add author name to response
+    # Add author and organization names to response
     report_data = db_report.__dict__
     report_data["author_name"] = current_user.name
+    report_data["organization_name"] = current_user.organization.name
     report_data["attachments"] = saved_attachments
     
     return report_data
@@ -470,19 +573,21 @@ async def read_reports(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     # Only show reports from the same organization
-    query = db.query(Report).filter(Report.organization_id == current_user.organization_id)
+    if current_user.role == "admin":
+        reports = db.query(Report).filter(Report.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
+    else:
+        reports = db.query(Report).filter(
+            Report.organization_id == current_user.organization_id,
+            Report.author_id == current_user.id
+        ).offset(skip).limit(limit).all()
     
-    if current_user.role != "admin":
-        query = query.filter(Report.author_id == current_user.id)
-    
-    reports = query.offset(skip).limit(limit).all()
-    
-    # Add author names and attachments to response
+    # Add author and organization names to response
     reports_data = []
     for report in reports:
         report_data = report.__dict__
         author = db.query(User).filter(User.id == report.author_id).first()
         report_data["author_name"] = author.name
+        report_data["organization_name"] = report.organization.name
         
         attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
         report_data["attachments"] = [
@@ -505,22 +610,23 @@ async def read_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
-    
+    report = db.query(Report).filter(Report.id == report_id).first()
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    # Check permissions
+    # Check permissions - must be from same organization
+    if report.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this report")
+    
+    # For non-admin users, can only access their own reports
     if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to access this report")
     
-    # Add author name and attachments to response
+    # Add author and organization names to response
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
+    report_data["organization_name"] = report.organization.name
     
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
@@ -543,13 +649,13 @@ async def update_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
-    
+    report = db.query(Report).filter(Report.id == report_id).first()
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Verify report is from same organization
+    if report.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this report")
     
     if status is not None:
         report.status = status
@@ -559,10 +665,11 @@ async def update_report(
     db.commit()
     db.refresh(report)
     
-    # Add author name and attachments to response
+    # Add author and organization names to response
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
+    report_data["organization_name"] = report.organization.name
     
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
@@ -583,15 +690,15 @@ async def delete_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
-    
+    report = db.query(Report).filter(Report.id == report_id).first()
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    # Check permissions
+    # Check permissions - must be from same organization
+    if report.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this report")
+    
+    # For non-admin users, can only delete their own reports
     if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this report")
     
@@ -611,13 +718,13 @@ async def update_report_status(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
-    
+    report = db.query(Report).filter(Report.id == report_id).first()
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Verify report is from same organization
+    if report.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this report")
     
     # Update status and comments
     report.status = status_update.status
@@ -626,10 +733,11 @@ async def update_report_status(
     db.commit()
     db.refresh(report)
     
-    # Add author name and attachments to response
+    # Add author and organization names to response
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
+    report_data["organization_name"] = report.organization.name
     
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
@@ -643,93 +751,6 @@ async def update_report_status(
     ]
     
     return report_data
-
-@app.get("/auth/first-user")
-async def check_first_user(db: Session = Depends(get_db)):
-    user_count = db.query(User).count()
-    return {"is_first_user": user_count == 0}
-
-@app.post("/auth/signup", response_model=Token)
-async def signup_user(
-    name: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-    organization: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
-):
-    # Check if email already exists
-    existing_user = get_user(db, email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
-    
-    # Check if this is the first user
-    is_first_user = db.query(User).count() == 0
-    
-    # First user must provide organization name
-    if is_first_user and not organization:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Organization name is required for the first user"
-        )
-    
-    # Create organization if this is the first user
-    org = None
-    if is_first_user and organization:
-        # Check if organization name already exists
-        existing_org = db.query(Organization).filter(Organization.name == organization).first()
-        if existing_org:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Organization name already exists"
-            )
-        
-        org = Organization(name=organization)
-        db.add(org)
-        db.commit()
-        db.refresh(org)
-    
-    # For subsequent users, find their organization
-    if not is_first_user and organization:
-        org = db.query(Organization).filter(Organization.name == organization).first()
-        if not org:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Organization not found"
-            )
-    
-    # Create user
-    hashed_password = get_password_hash(password)
-    role = "admin" if is_first_user else "staff"
-    
-    db_user = User(
-        email=email,
-        name=name,
-        hashed_password=hashed_password,
-        role=role,
-        organization_id=org.id if org else None
-    )
-    
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    
-    # Create access token
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": db_user.email}, expires_delta=access_token_expires
-    )
-    
-    # Prepare response
-    response_data = {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "organization": org.name if org else None
-    }
-    
-    return response_data
 
 @app.get("/download/{filename}")
 async def download_file(
@@ -749,13 +770,9 @@ async def download_file(
     if not attachment:
         raise HTTPException(status_code=404, detail="File record not found")
     
-    # Check if the report belongs to the same organization
-    report = db.query(Report).filter(
-        Report.id == attachment.report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
-    
-    if not report:
+    # Check organization
+    report = db.query(Report).filter(Report.id == attachment.report_id).first()
+    if not report or report.organization_id != current_user.organization_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this file")
     
     if current_user.role != "admin" and report.author_id != current_user.id:
@@ -772,30 +789,30 @@ async def download_file(
 def init_default_admin():
     db = SessionLocal()
     try:
-        # Check if there's already an admin
+        # Check if any organizations exist
+        org_count = db.query(Organization).count()
+        if org_count == 0:
+            # Create default organization
+            org = Organization(name="Default Organization")
+            db.add(org)
+            db.commit()
+        
+        # Check if admin user exists
         admin = db.query(User).filter(User.email == "admin@reporthub.com").first()
         if not admin:
-            try:
-                # Create default organization
-                org = Organization(name="Default Organization")
-                db.add(org)
-                db.commit()
-                db.refresh(org)
-                
-                # Create admin user
-                hashed_password = get_password_hash("Admin123!")
-                admin = User(
-                    name="Admin User",
-                    email="admin@reporthub.com",
-                    hashed_password=hashed_password,
-                    role="admin",
-                    organization_id=org.id
-                )
-                db.add(admin)
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                print(f"Error creating default admin: {e}")
+            # Get the first organization
+            org = db.query(Organization).first()
+            
+            hashed_password = get_password_hash("Admin123!")
+            admin = User(
+                name="Admin User",
+                email="admin@reporthub.com",
+                hashed_password=hashed_password,
+                role="admin",
+                organization_id=org.id
+            )
+            db.add(admin)
+            db.commit()
     finally:
         db.close()
 
