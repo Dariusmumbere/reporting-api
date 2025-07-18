@@ -3,7 +3,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, validator
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
@@ -24,7 +24,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Security configuration
-SECRET_KEY = "your-secret-key-here"
+SECRET_KEY = "your-secret-key-here"  # In production, use a proper secret key from environment variables
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -119,7 +119,7 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
     role: str = "staff"
-    organization: Optional[str] = None
+    organization_name: Optional[str] = None
 
     @validator('password')
     def password_complexity(cls, v):
@@ -254,16 +254,6 @@ async def is_admin(current_user: UserInDB = Depends(get_current_active_user)):
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
-def create_organization(db: Session, name: str):
-    org = Organization(name=name)
-    db.add(org)
-    db.commit()
-    db.refresh(org)
-    return org
-
-def get_organization_by_name(db: Session, name: str):
-    return db.query(Organization).filter(Organization.name == name).first()
-
 # Initialize FastAPI app
 app = FastAPI(
     title="ReportHub API",
@@ -299,107 +289,18 @@ async def login_for_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     
-    response_data = {
-        "access_token": access_token,
-        "token_type": "bearer"
-    }
+    # Get organization name if exists
+    organization_name = user.organization.name if user.organization else None
     
-    if user.organization:
-        response_data["organization"] = user.organization.name
-    
-    return response_data
+    return {"access_token": access_token, "token_type": "bearer", "organization": organization_name}
 
 @app.get("/auth/me", response_model=UserInDB)
-async def read_users_me(current_user: UserInDB = Depends(get_current_active_user)):
+async def read_users_me(current_user: UserInDB = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    # Add organization name to response
     user_data = current_user.__dict__
     if current_user.organization:
         user_data["organization_name"] = current_user.organization.name
     return user_data
-
-@app.get("/auth/first-user")
-async def check_first_user(db: Session = Depends(get_db)):
-    user_count = db.query(User).count()
-    return {"is_first_user": user_count == 0}
-
-@app.post("/auth/signup", response_model=Token)
-async def signup_user(
-    name: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-    organization: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
-):
-    # Check if email already exists
-    existing_user = get_user(db, email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
-    
-    # Check if this is the first user
-    is_first_user = db.query(User).count() == 0
-    
-    # If this is the first user, organization name is required
-    if is_first_user and not organization:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Organization name is required for the first user"
-        )
-    
-    # Create organization if this is the first user
-    org = None
-    if is_first_user:
-        org = get_organization_by_name(db, organization)
-        if not org:
-            org = create_organization(db, organization)
-    
-    # For subsequent users, get their organization from the email domain or other logic
-    # For now, we'll require organization name for all signups
-    if not is_first_user and not organization:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Organization name is required"
-        )
-    
-    if not is_first_user:
-        org = get_organization_by_name(db, organization)
-        if not org:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Organization not found"
-            )
-    
-    # Create user
-    hashed_password = get_password_hash(password)
-    role = "admin" if is_first_user else "staff"
-    
-    db_user = User(
-        email=email,
-        name=name,
-        hashed_password=hashed_password,
-        role=role,
-        organization_id=org.id
-    )
-    
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    
-    # Create access token
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": db_user.email}, expires_delta=access_token_expires
-    )
-    
-    # Prepare response
-    response_data = {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "organization": org.name
-    }
-    
-    return response_data
 
 # User routes
 @app.post("/users", response_model=UserInDB)
@@ -412,24 +313,27 @@ async def create_user(
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Validate organization
-    org = None
-    if user.organization:
-        org = get_organization_by_name(db, user.organization)
-        if not org:
-            raise HTTPException(
-                status_code=400,
-                detail="Organization not found"
-            )
-    
     hashed_password = get_password_hash(user.password)
+    
+    # Check if organization exists (for admin creating users)
+    organization_id = current_user.organization_id
+    if user.organization_name:
+        # Only allow admins to specify organization
+        if current_user.role != "admin":
+            raise HTTPException(status_code=403, detail="Not authorized to specify organization")
+        
+        # Check if organization exists
+        organization = db.query(Organization).filter(Organization.name == user.organization_name).first()
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        organization_id = organization.id
     
     db_user = User(
         email=user.email,
         name=user.name,
         hashed_password=hashed_password,
         role=user.role,
-        organization_id=org.id if org else current_user.organization_id
+        organization_id=organization_id
     )
     
     db.add(db_user)
@@ -447,16 +351,7 @@ async def read_users(
 ):
     # Only show users from the same organization
     users = db.query(User).filter(User.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
-    
-    # Add organization name to each user
-    users_data = []
-    for user in users:
-        user_data = user.__dict__
-        if user.organization:
-            user_data["organization_name"] = user.organization.name
-        users_data.append(user_data)
-    
-    return users_data
+    return users
 
 @app.get("/users/{user_id}", response_model=UserInDB)
 async def read_user(
@@ -464,19 +359,10 @@ async def read_user(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    db_user = db.query(User).filter(User.id == user_id).first()
+    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    # Verify user is from the same organization
-    if db_user.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this user")
-    
-    user_data = db_user.__dict__
-    if db_user.organization:
-        user_data["organization_name"] = db_user.organization.name
-    
-    return user_data
+    return db_user
 
 @app.delete("/users/{user_id}")
 async def delete_user(
@@ -487,13 +373,9 @@ async def delete_user(
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     
-    db_user = db.query(User).filter(User.id == user_id).first()
+    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    # Verify user is from the same organization
-    if db_user.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this user")
     
     db.delete(db_user)
     db.commit()
@@ -573,13 +455,12 @@ async def read_reports(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     # Only show reports from the same organization
-    if current_user.role == "admin":
-        reports = db.query(Report).filter(Report.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
-    else:
-        reports = db.query(Report).filter(
-            Report.organization_id == current_user.organization_id,
-            Report.author_id == current_user.id
-        ).offset(skip).limit(limit).all()
+    query = db.query(Report).filter(Report.organization_id == current_user.organization_id)
+    
+    if current_user.role != "admin":
+        query = query.filter(Report.author_id == current_user.id)
+    
+    reports = query.offset(skip).limit(limit).all()
     
     # Add author and organization names to response
     reports_data = []
@@ -610,15 +491,15 @@ async def read_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    # Check permissions - must be from same organization
-    if report.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this report")
-    
-    # For non-admin users, can only access their own reports
+    # Check permissions
     if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to access this report")
     
@@ -649,13 +530,13 @@ async def update_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
-    # Verify report is from same organization
-    if report.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=403, detail="Not authorized to update this report")
     
     if status is not None:
         report.status = status
@@ -690,15 +571,15 @@ async def delete_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    # Check permissions - must be from same organization
-    if report.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this report")
-    
-    # For non-admin users, can only delete their own reports
+    # Check permissions
     if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this report")
     
@@ -718,13 +599,13 @@ async def update_report_status(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_admin)
 ):
-    report = db.query(Report).filter(Report.id == report_id).first()
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
-    # Verify report is from same organization
-    if report.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=403, detail="Not authorized to update this report")
     
     # Update status and comments
     report.status = status_update.status
@@ -752,6 +633,94 @@ async def update_report_status(
     
     return report_data
 
+@app.get("/auth/first-user")
+async def check_first_user(db: Session = Depends(get_db)):
+    user_count = db.query(User).count()
+    return {"is_first_user": user_count == 0}
+
+@app.post("/auth/signup", response_model=Token)
+async def signup_user(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    organization_name: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    # Check if email already exists
+    existing_user = get_user(db, email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Check if this is the first user
+    is_first_user = db.query(User).count() == 0
+    
+    # If this is the first user, organization name is required
+    if is_first_user and not organization_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization name is required for the first user"
+        )
+    
+    # Create organization if this is the first user
+    organization_id = None
+    if is_first_user and organization_name:
+        # Check if organization already exists
+        existing_org = db.query(Organization).filter(Organization.name == organization_name).first()
+        if existing_org:
+            organization_id = existing_org.id
+        else:
+            # Create new organization
+            db_org = Organization(name=organization_name)
+            db.add(db_org)
+            db.commit()
+            db.refresh(db_org)
+            organization_id = db_org.id
+    
+    # For subsequent users, get organization from existing user
+    if not is_first_user:
+        # Get any existing user to get organization ID
+        existing_user = db.query(User).first()
+        if not existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No organization found"
+            )
+        organization_id = existing_user.organization_id
+    
+    # Create user
+    hashed_password = get_password_hash(password)
+    role = "admin" if is_first_user else "staff"
+    
+    db_user = User(
+        email=email,
+        name=name,
+        hashed_password=hashed_password,
+        role=role,
+        organization_id=organization_id
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": db_user.email}, expires_delta=access_token_expires
+    )
+    
+    # Get organization name for response
+    organization = db.query(Organization).filter(Organization.id == organization_id).first()
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "organization": organization.name if organization else None
+    }
+
 @app.get("/download/{filename}")
 async def download_file(
     filename: str,
@@ -770,10 +739,14 @@ async def download_file(
     if not attachment:
         raise HTTPException(status_code=404, detail="File record not found")
     
-    # Check organization
-    report = db.query(Report).filter(Report.id == attachment.report_id).first()
-    if not report or report.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this file")
+    # Check if report belongs to user's organization
+    report = db.query(Report).filter(
+        Report.id == attachment.report_id,
+        Report.organization_id == current_user.organization_id
+    ).first()
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
     
     if current_user.role != "admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to access this file")
@@ -789,20 +762,16 @@ async def download_file(
 def init_default_admin():
     db = SessionLocal()
     try:
-        # Check if any organizations exist
-        org_count = db.query(Organization).count()
-        if org_count == 0:
+        # Check if any users exist
+        user_count = db.query(User).count()
+        if user_count == 0:
             # Create default organization
             org = Organization(name="Default Organization")
             db.add(org)
             db.commit()
-        
-        # Check if admin user exists
-        admin = db.query(User).filter(User.email == "admin@reporthub.com").first()
-        if not admin:
-            # Get the first organization
-            org = db.query(Organization).first()
+            db.refresh(org)
             
+            # Create admin user
             hashed_password = get_password_hash("Admin123!")
             admin = User(
                 name="Admin User",
