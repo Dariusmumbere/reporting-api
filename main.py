@@ -11,7 +11,7 @@ from passlib.context import CryptContext
 import os
 import uuid
 from fastapi import FastAPI
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import func
@@ -100,8 +100,57 @@ class Attachment(Base):
     report = relationship("Report", back_populates="attachments")
     uploader = relationship("User", back_populates="attachments")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Drop all tables if they exist and create fresh ones
+def reset_database():
+    db = SessionLocal()
+    try:
+        # Drop all tables
+        Base.metadata.drop_all(bind=engine)
+        
+        # Create all tables
+        Base.metadata.create_all(bind=engine)
+        
+        # Commit the changes
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise e
+    finally:
+        db.close()
+
+# Initialize default admin user
+def init_default_admin():
+    db = SessionLocal()
+    try:
+        # Check if any users exist
+        user_count = db.query(User).count()
+        if user_count == 0:
+            # Create default organization
+            org = Organization(name="Default Organization")
+            db.add(org)
+            db.commit()
+            db.refresh(org)
+            
+            # Create admin user
+            hashed_password = get_password_hash("Admin123!")
+            admin = User(
+                name="Admin User",
+                email="admin@reporthub.com",
+                hashed_password=hashed_password,
+                role="admin",
+                organization_id=org.id
+            )
+            db.add(admin)
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        raise e
+    finally:
+        db.close()
+
+# Reset database and initialize data
+reset_database()
+init_default_admin()
 
 # Pydantic models
 class Token(BaseModel):
@@ -145,7 +194,7 @@ class UserInDB(UserBase):
     organization_name: Optional[str]
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # Updated from orm_mode to from_attributes for Pydantic v2
 
 class ReportBase(BaseModel):
     title: str
@@ -168,7 +217,7 @@ class ReportInDB(ReportBase):
     attachments: List[dict] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # Updated from orm_mode to from_attributes for Pydantic v2
 
 class AttachmentInDB(BaseModel):
     id: int
@@ -178,7 +227,7 @@ class AttachmentInDB(BaseModel):
     url: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # Updated from orm_mode to from_attributes for Pydantic v2
 
 class ReportStatusUpdate(BaseModel):
     status: str
@@ -757,33 +806,3 @@ async def download_file(
         filename=attachment.name,
         media_type=attachment.type
     )
-
-# Initialize default admin user
-def init_default_admin():
-    db = SessionLocal()
-    try:
-        # Check if any users exist
-        user_count = db.query(User).count()
-        if user_count == 0:
-            # Create default organization
-            org = Organization(name="Default Organization")
-            db.add(org)
-            db.commit()
-            db.refresh(org)
-            
-            # Create admin user
-            hashed_password = get_password_hash("Admin123!")
-            admin = User(
-                name="Admin User",
-                email="admin@reporthub.com",
-                hashed_password=hashed_password,
-                role="admin",
-                organization_id=org.id
-            )
-            db.add(admin)
-            db.commit()
-    finally:
-        db.close()
-
-# Call the function to create default admin when starting up
-init_default_admin()
