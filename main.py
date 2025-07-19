@@ -88,7 +88,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_active = Column(DateTime(timezone=True))
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)  # Changed to nullable for signup
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
 
     organization = relationship("Organization", back_populates="users")
     reports = relationship("Report", back_populates="author")
@@ -104,7 +104,7 @@ class Report(Base):
     status = Column(String, default="pending", nullable=False)
     admin_comments = Column(String)
     author_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)  # Changed to nullable
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -182,7 +182,7 @@ init_default_admin()
 class Token(BaseModel):
     access_token: str
     token_type: str
-    requires_org_registration: bool = False  # New field to indicate if org registration is needed
+    requires_org_registration: bool = False
 
 class TokenData(BaseModel):
     email: Optional[str] = None
@@ -235,8 +235,8 @@ class ReportInDB(ReportBase):
     admin_comments: Optional[str]
     author_id: int
     author_name: str
-    organization_id: Optional[int]
-    organization_name: Optional[str]
+    organization_id: int
+    organization_name: str
     created_at: datetime
     updated_at: Optional[datetime]
     attachments: List[dict] = []
@@ -292,6 +292,11 @@ async def get_current_active_user(current_user: UserInDB = Depends(get_current_u
     return current_user
 
 async def is_admin(current_user: UserInDB = Depends(get_current_active_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    return current_user
+
+async def is_org_admin_or_super_admin(current_user: UserInDB = Depends(get_current_active_user)):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
@@ -401,6 +406,7 @@ async def signup_user(
         "token_type": "bearer",
         "requires_org_registration": True
     }
+
 @app.post("/auth/register-organization")
 async def register_organization(
     organization: OrganizationCreate,
@@ -441,7 +447,7 @@ async def register_organization(
 async def create_user(
     user: UserCreate, 
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(is_admin)
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
     db_user = get_user(db, email=user.email)
     if db_user:
@@ -469,7 +475,7 @@ async def read_users(
     skip: int = 0, 
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(is_admin)
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
     # Only show users from the same organization
     users = db.query(User).filter(User.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
@@ -479,9 +485,12 @@ async def read_users(
 async def read_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(is_admin)
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
-    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
+    db_user = db.query(User).filter(
+        User.id == user_id,
+        User.organization_id == current_user.organization_id
+    ).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return db_user
@@ -490,12 +499,15 @@ async def read_user(
 async def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(is_admin)
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     
-    db_user = db.query(User).filter(User.id == user_id, User.organization_id == current_user.organization_id).first()
+    db_user = db.query(User).filter(
+        User.id == user_id,
+        User.organization_id == current_user.organization_id
+    ).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -668,7 +680,7 @@ async def update_report(
     status: Optional[str] = None,
     admin_comments: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(is_admin)
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
     report = db.query(Report).filter(
         Report.id == report_id,
@@ -737,7 +749,7 @@ async def update_report_status(
     report_id: int,
     status_update: ReportStatusUpdate,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(is_admin)
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
     report = db.query(Report).filter(
         Report.id == report_id,
