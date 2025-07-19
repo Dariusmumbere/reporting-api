@@ -1,20 +1,21 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Body
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Body, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr, validator
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, EmailStr, validator
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
 import uuid
-from fastapi import FastAPI
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, text
+import json
+import asyncio
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
-from sqlalchemy.sql import func
+from sqlalchemy.sql import text
 
 # Database configuration
 DATABASE_URL = "postgresql://reporting_wlcd_user:sYC2WmtyjDCjyxvCPjoRNYAH4OCpVp6L@dpg-d1p23rc9c44c738581ig-a/reporting_wlcd"
@@ -93,6 +94,8 @@ class User(Base):
     organization = relationship("Organization", back_populates="users")
     reports = relationship("Report", back_populates="author")
     attachments = relationship("Attachment", back_populates="uploader")
+    sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
+    received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
 
 class Report(Base):
     __tablename__ = "reports"
@@ -125,6 +128,51 @@ class Attachment(Base):
 
     report = relationship("Report", back_populates="attachments")
     uploader = relationship("User", back_populates="attachments")
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    recipient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(String, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    status = Column(String, default="delivered")  # delivered, read
+
+    sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
+    recipient = relationship("User", foreign_keys=[recipient_id], back_populates="received_messages")
+
+# WebSocket Connection Manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[int, WebSocket] = {}
+        self.user_status: Dict[int, str] = {}
+
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        self.user_status[user_id] = "online"
+        await self.broadcast_user_status(user_id, "online")
+
+    def disconnect(self, user_id: int):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            self.user_status[user_id] = "offline"
+            asyncio.create_task(self.broadcast_user_status(user_id, "offline"))
+
+    async def send_personal_message(self, message: str, user_id: int):
+        if user_id in self.active_connections:
+            await self.active_connections[user_id].send_text(message)
+
+    async def broadcast_user_status(self, user_id: int, status: str):
+        for connection in self.active_connections.values():
+            await connection.send_text(json.dumps({
+                "type": "user_status",
+                "user_id": user_id,
+                "status": status
+            }))
+
+manager = ConnectionManager()
 
 # Drop all tables if they exist and create fresh ones
 def reset_database():
@@ -261,6 +309,21 @@ class ReportStatusUpdate(BaseModel):
 class OrganizationCreate(BaseModel):
     name: str
 
+class ChatMessageModel(BaseModel):
+    id: int
+    sender_id: int
+    recipient_id: int
+    content: str
+    timestamp: datetime
+    status: str
+
+class ChatUser(BaseModel):
+    id: int
+    name: str
+    email: str
+    status: str
+    unread_count: int = 0
+
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -323,6 +386,89 @@ os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 # Mount static files directory for attachments
 app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
+
+# WebSocket endpoint for chat
+@app.websocket("/ws/chat")
+async def websocket_endpoint(websocket: WebSocket, token: str = None):
+    try:
+        # Authenticate user
+        if not token:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            email: str = payload.get("sub")
+            if email is None:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+        except JWTError:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        db = SessionLocal()
+        user = get_user(db, email=email)
+        if user is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        # Connect the user
+        await manager.connect(websocket, user.id)
+
+        # Send authentication response
+        await websocket.send_text(json.dumps({
+            "type": "auth_response",
+            "success": True,
+            "user_id": user.id
+        }))
+
+        # Keep connection alive
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+
+            if message["type"] == "message":
+                # Save message to database
+                db_message = ChatMessage(
+                    sender_id=user.id,
+                    recipient_id=message["recipient_id"],
+                    content=message["content"],
+                    timestamp=datetime.utcnow(),
+                    status="delivered"
+                )
+                db.add(db_message)
+                db.commit()
+                db.refresh(db_message)
+
+                # Send to recipient if online
+                await manager.send_personal_message(json.dumps({
+                    "type": "message",
+                    "message": {
+                        "id": db_message.id,
+                        "sender_id": db_message.sender_id,
+                        "recipient_id": db_message.recipient_id,
+                        "content": db_message.content,
+                        "timestamp": db_message.timestamp.isoformat(),
+                        "status": db_message.status
+                    }
+                }), message["recipient_id"])
+
+            elif message["type"] == "mark_read":
+                # Mark messages as read
+                db.query(ChatMessage).filter(
+                    ChatMessage.sender_id == message["sender_id"],
+                    ChatMessage.recipient_id == user.id,
+                    ChatMessage.status == "delivered"
+                ).update({"status": "read"})
+                db.commit()
+
+    except WebSocketDisconnect:
+        manager.disconnect(user.id)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        manager.disconnect(user.id)
+    finally:
+        db.close()
 
 # Auth routes
 @app.post("/auth/login", response_model=Token)
@@ -441,6 +587,65 @@ async def register_organization(
     db.refresh(current_user)
     
     return {"message": "Organization registered successfully"}
+
+# Chat routes
+@app.get("/chat/users", response_model=List[ChatUser])
+async def get_chat_users(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Get all users in the same organization
+    users = db.query(User).filter(
+        User.organization_id == current_user.organization_id,
+        User.id != current_user.id
+    ).all()
+
+    # Get unread message counts
+    unread_counts = db.query(
+        ChatMessage.sender_id,
+        func.count(ChatMessage.id).label("unread_count")
+    ).filter(
+        ChatMessage.recipient_id == current_user.id,
+        ChatMessage.status == "delivered"
+    ).group_by(ChatMessage.sender_id).all()
+
+    unread_dict = {user_id: count for user_id, count in unread_counts}
+
+    # Format response
+    chat_users = []
+    for user in users:
+        chat_users.append(ChatUser(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+            status="online" if user.id in manager.active_connections else "offline",
+            unread_count=unread_dict.get(user.id, 0)
+        ))
+
+    return chat_users
+
+@app.get("/chat/messages/{user_id}", response_model=List[ChatMessageModel])
+async def get_chat_messages(
+    user_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Get messages between current user and the other user
+    messages = db.query(ChatMessage).filter(
+        ((ChatMessage.sender_id == current_user.id) & (ChatMessage.recipient_id == user_id)) |
+        ((ChatMessage.sender_id == user_id) & (ChatMessage.recipient_id == current_user.id))
+    ).order_by(ChatMessage.timestamp.desc()).limit(limit).all()
+
+    # Mark messages as read
+    db.query(ChatMessage).filter(
+        ChatMessage.sender_id == user_id,
+        ChatMessage.recipient_id == current_user.id,
+        ChatMessage.status == "delivered"
+    ).update({"status": "read"})
+    db.commit()
+
+    return messages[::-1]  # Return in chronological order
 
 # User routes
 @app.post("/users", response_model=UserInDB)
