@@ -88,7 +88,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_active = Column(DateTime(timezone=True))
-    organization_id = Column(Integer, ForeignKey("organizations.id"))
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)  # Changed to nullable for signup
 
     organization = relationship("Organization", back_populates="users")
     reports = relationship("Report", back_populates="author")
@@ -104,7 +104,7 @@ class Report(Base):
     status = Column(String, default="pending", nullable=False)
     admin_comments = Column(String)
     author_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)  # Changed to nullable
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -182,7 +182,7 @@ init_default_admin()
 class Token(BaseModel):
     access_token: str
     token_type: str
-    organization: Optional[str] = None
+    requires_org_registration: bool = False  # New field to indicate if org registration is needed
 
 class TokenData(BaseModel):
     email: Optional[str] = None
@@ -194,7 +194,6 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
     role: str = "staff"
-    organization_name: Optional[str] = None
 
     @validator('password')
     def password_complexity(cls, v):
@@ -220,7 +219,7 @@ class UserInDB(UserBase):
     organization_name: Optional[str]
 
     class Config:
-        from_attributes = True  # Updated from orm_mode to from_attributes for Pydantic v2
+        from_attributes = True
 
 class ReportBase(BaseModel):
     title: str
@@ -236,14 +235,14 @@ class ReportInDB(ReportBase):
     admin_comments: Optional[str]
     author_id: int
     author_name: str
-    organization_id: int
-    organization_name: str
+    organization_id: Optional[int]
+    organization_name: Optional[str]
     created_at: datetime
     updated_at: Optional[datetime]
     attachments: List[dict] = []
 
     class Config:
-        from_attributes = True  # Updated from orm_mode to from_attributes for Pydantic v2
+        from_attributes = True
 
 class AttachmentInDB(BaseModel):
     id: int
@@ -253,11 +252,14 @@ class AttachmentInDB(BaseModel):
     url: str
 
     class Config:
-        from_attributes = True  # Updated from orm_mode to from_attributes for Pydantic v2
+        from_attributes = True
 
 class ReportStatusUpdate(BaseModel):
     status: str
     admin_comments: Optional[str] = None
+
+class OrganizationCreate(BaseModel):
+    name: str
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -336,10 +338,14 @@ async def login_for_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     
-    # Get organization name if exists
-    organization_name = user.organization.name if user.organization else None
+    # Check if user has an organization
+    requires_org_registration = user.organization_id is None
     
-    return {"access_token": access_token, "token_type": "bearer", "organization": organization_name}
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "requires_org_registration": requires_org_registration
+    }
 
 @app.get("/auth/me", response_model=UserInDB)
 async def read_users_me(current_user: UserInDB = Depends(get_current_active_user), db: Session = Depends(get_db)):
@@ -348,6 +354,87 @@ async def read_users_me(current_user: UserInDB = Depends(get_current_active_user
     if current_user.organization:
         user_data["organization_name"] = current_user.organization.name
     return user_data
+
+@app.post("/auth/signup", response_model=Token)
+async def signup_user(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    # Check if email already exists
+    existing_user = get_user(db, email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create user without organization (will be set later)
+    hashed_password = get_password_hash(password)
+    
+    # First user becomes admin, others are staff
+    is_first_user = db.query(User).count() == 0
+    role = "admin" if is_first_user else "staff"
+    
+    db_user = User(
+        email=email,
+        name=name,
+        hashed_password=hashed_password,
+        role=role,
+        organization_id=None  # Organization will be set after registration
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": db_user.email}, expires_delta=access_token_expires
+    )
+    
+    # All new signups require organization registration
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "requires_org_registration": True
+    }
+
+@app.post("/auth/register-organization")
+async def register_organization(
+    organization: OrganizationCreate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Check if user already has an organization
+    if current_user.organization_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User already belongs to an organization"
+        )
+    
+    # Check if organization name already exists
+    existing_org = db.query(Organization).filter(Organization.name == organization.name).first()
+    if existing_org:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization name already exists"
+        )
+    
+    # Create new organization
+    db_org = Organization(name=organization.name)
+    db.add(db_org)
+    db.commit()
+    db.refresh(db_org)
+    
+    # Update user's organization
+    current_user.organization_id = db_org.id
+    db.commit()
+    db.refresh(current_user)
+    
+    return {"message": "Organization registered successfully"}
 
 # User routes
 @app.post("/users", response_model=UserInDB)
@@ -362,25 +449,13 @@ async def create_user(
     
     hashed_password = get_password_hash(user.password)
     
-    # Check if organization exists (for admin creating users)
-    organization_id = current_user.organization_id
-    if user.organization_name:
-        # Only allow admins to specify organization
-        if current_user.role != "admin":
-            raise HTTPException(status_code=403, detail="Not authorized to specify organization")
-        
-        # Check if organization exists
-        organization = db.query(Organization).filter(Organization.name == user.organization_name).first()
-        if not organization:
-            raise HTTPException(status_code=404, detail="Organization not found")
-        organization_id = organization.id
-    
+    # New users inherit the admin's organization
     db_user = User(
         email=user.email,
         name=user.name,
         hashed_password=hashed_password,
         role=user.role,
-        organization_id=organization_id
+        organization_id=current_user.organization_id
     )
     
     db.add(db_user)
@@ -439,6 +514,13 @@ async def create_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    # Check if user has an organization
+    if current_user.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User must belong to an organization to create reports"
+        )
+    
     # Create report
     db_report = Report(
         title=title,
@@ -501,6 +583,10 @@ async def read_reports(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    # Check if user has an organization
+    if current_user.organization_id is None:
+        return []
+    
     # Only show reports from the same organization
     query = db.query(Report).filter(Report.organization_id == current_user.organization_id)
     
@@ -538,6 +624,13 @@ async def read_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    # Check if user has an organization
+    if current_user.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User must belong to an organization to view reports"
+        )
+    
     report = db.query(Report).filter(
         Report.id == report_id,
         Report.organization_id == current_user.organization_id
@@ -684,121 +777,6 @@ async def update_report_status(
 async def check_first_user(db: Session = Depends(get_db)):
     user_count = db.query(User).count()
     return {"is_first_user": user_count == 0}
-
-@app.post("/users/update-organization")
-async def update_organization(
-    organization_name: str = Body(..., embed=True),
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    # Check if user is admin
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can update organization name")
-    
-    # Check if organization already exists for this user
-    if current_user.organization_id:
-        org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
-        if org:
-            org.name = organization_name
-            db.commit()
-            db.refresh(org)
-            return {"message": "Organization name updated successfully"}
-    
-    # Create new organization if none exists
-    db_org = Organization(name=organization_name)
-    db.add(db_org)
-    db.commit()
-    db.refresh(db_org)
-    
-    # Update user's organization
-    current_user.organization_id = db_org.id
-    db.commit()
-    db.refresh(current_user)
-    
-    return {"message": "Organization created successfully"}
-
-@app.post("/auth/signup", response_model=Token)
-async def signup_user(
-    name: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-    organization_name: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
-):
-    # Check if email already exists
-    existing_user = get_user(db, email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
-    
-    # Check if this is the first user
-    is_first_user = db.query(User).count() == 0
-    
-    # If this is the first user, organization name is required
-    if is_first_user and not organization_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Organization name is required for the first user"
-        )
-    
-    # Create organization if this is the first user
-    organization_id = None
-    if is_first_user and organization_name:
-        # Check if organization already exists
-        existing_org = db.query(Organization).filter(Organization.name == organization_name).first()
-        if existing_org:
-            organization_id = existing_org.id
-        else:
-            # Create new organization
-            db_org = Organization(name=organization_name)
-            db.add(db_org)
-            db.commit()
-            db.refresh(db_org)
-            organization_id = db_org.id
-    
-    # For subsequent users, get organization from existing user
-    if not is_first_user:
-        # Get any existing user to get organization ID
-        existing_user = db.query(User).first()
-        if not existing_user:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No organization found"
-            )
-        organization_id = existing_user.organization_id
-    
-    # Create user
-    hashed_password = get_password_hash(password)
-    role = "admin" if is_first_user else "staff"
-    
-    db_user = User(
-        email=email,
-        name=name,
-        hashed_password=hashed_password,
-        role=role,
-        organization_id=organization_id
-    )
-    
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    
-    # Create access token
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": db_user.email}, expires_delta=access_token_expires
-    )
-    
-    # Get organization name for response
-    organization = db.query(Organization).filter(Organization.id == organization_id).first()
-    
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "organization": organization.name if organization else None
-    }
 
 @app.get("/download/{filename}")
 async def download_file(
