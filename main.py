@@ -401,7 +401,6 @@ async def signup_user(
         "token_type": "bearer",
         "requires_org_registration": True
     }
-
 @app.post("/auth/register-organization")
 async def register_organization(
     organization: OrganizationCreate,
@@ -429,8 +428,9 @@ async def register_organization(
     db.commit()
     db.refresh(db_org)
     
-    # Update user's organization
+    # Update user's organization and make them admin
     current_user.organization_id = db_org.id
+    current_user.role = "admin"  # This is the key change - make them admin
     db.commit()
     db.refresh(current_user)
     
