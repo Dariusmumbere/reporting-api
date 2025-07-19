@@ -174,24 +174,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Drop all tables if they exist and create fresh ones
-def reset_database():
-    db = SessionLocal()
-    try:
-        # Drop all tables
-        Base.metadata.drop_all(bind=engine)
-        
-        # Create all tables
-        Base.metadata.create_all(bind=engine)
-        
-        # Commit the changes
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise e
-    finally:
-        db.close()
-
 # Initialize default admin user
 def init_default_admin():
     db = SessionLocal()
@@ -223,7 +205,6 @@ def init_default_admin():
         db.close()
 
 # Reset database and initialize data
-reset_database()
 init_default_admin()
 
 # Pydantic models
