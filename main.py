@@ -358,7 +358,7 @@ async def read_users_me(current_user: UserInDB = Depends(get_current_active_user
     user_data = current_user.__dict__
     if current_user.organization:
         user_data["organization_name"] = current_user.organization.name
-    return user_data
+    return UserInDB(**user_data)
 
 @app.post("/auth/signup", response_model=Token)
 async def signup_user(
@@ -468,7 +468,11 @@ async def create_user(
     db.commit()
     db.refresh(db_user)
     
-    return db_user
+    # Include organization name in response
+    user_data = db_user.__dict__
+    if db_user.organization:
+        user_data["organization_name"] = db_user.organization.name
+    return UserInDB(**user_data)
 
 @app.get("/users", response_model=List[UserInDB])
 async def read_users(
@@ -479,7 +483,16 @@ async def read_users(
 ):
     # Only show users from the same organization
     users = db.query(User).filter(User.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
-    return users
+    
+    # Convert to UserInDB with organization_name
+    users_data = []
+    for user in users:
+        user_data = user.__dict__
+        if user.organization:
+            user_data["organization_name"] = user.organization.name
+        users_data.append(UserInDB(**user_data))
+    
+    return users_data
 
 @app.get("/users/{user_id}", response_model=UserInDB)
 async def read_user(
@@ -493,7 +506,12 @@ async def read_user(
     ).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return db_user
+    
+    # Include organization name in response
+    user_data = db_user.__dict__
+    if db_user.organization:
+        user_data["organization_name"] = db_user.organization.name
+    return UserInDB(**user_data)
 
 @app.delete("/users/{user_id}")
 async def delete_user(
@@ -586,7 +604,7 @@ async def create_report(
     report_data["organization_name"] = current_user.organization.name
     report_data["attachments"] = saved_attachments
     
-    return report_data
+    return ReportInDB(**report_data)
 
 @app.get("/reports", response_model=List[ReportInDB])
 async def read_reports(
@@ -626,7 +644,7 @@ async def read_reports(
             } for a in attachments
         ]
         
-        reports_data.append(report_data)
+        reports_data.append(ReportInDB(**report_data))
     
     return reports_data
 
@@ -672,7 +690,7 @@ async def read_report(
         } for a in attachments
     ]
     
-    return report_data
+    return ReportInDB(**report_data)
 
 @app.patch("/reports/{report_id}", response_model=ReportInDB)
 async def update_report(
@@ -715,7 +733,7 @@ async def update_report(
         } for a in attachments
     ]
     
-    return report_data
+    return ReportInDB(**report_data)
 
 @app.delete("/reports/{report_id}")
 async def delete_report(
@@ -783,7 +801,7 @@ async def update_report_status(
         } for a in attachments
     ]
     
-    return report_data
+    return ReportInDB(**report_data)
 
 @app.get("/auth/first-user")
 async def check_first_user(db: Session = Depends(get_db)):
