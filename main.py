@@ -685,6 +685,38 @@ async def check_first_user(db: Session = Depends(get_db)):
     user_count = db.query(User).count()
     return {"is_first_user": user_count == 0}
 
+@app.post("/users/update-organization")
+async def update_organization(
+    organization_name: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Check if user is admin
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update organization name")
+    
+    # Check if organization already exists for this user
+    if current_user.organization_id:
+        org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
+        if org:
+            org.name = organization_name
+            db.commit()
+            db.refresh(org)
+            return {"message": "Organization name updated successfully"}
+    
+    # Create new organization if none exists
+    db_org = Organization(name=organization_name)
+    db.add(db_org)
+    db.commit()
+    db.refresh(db_org)
+    
+    # Update user's organization
+    current_user.organization_id = db_org.id
+    db.commit()
+    db.refresh(current_user)
+    
+    return {"message": "Organization created successfully"}
+
 @app.post("/auth/signup", response_model=Token)
 async def signup_user(
     name: str = Form(...),
