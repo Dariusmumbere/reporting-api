@@ -127,7 +127,7 @@ class Organization(Base):
 
     users = relationship("User", back_populates="organization")
     reports = relationship("Report", back_populates="organization")
-
+    
 class User(Base):
     __tablename__ = "users"
 
@@ -163,7 +163,15 @@ class Report(Base):
 
     author = relationship("User", back_populates="reports")
     organization = relationship("Organization", back_populates="reports")
-    attachments = relationship("Attachment", back_populates="report")
+    attachments = relationship("Attachment", back_populates="report
+
+class OrganizationResponse(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True  # This replaces orm_mode = True in Pydantic v2
 
 class Attachment(Base):
     __tablename__ = "attachments"
@@ -1137,15 +1145,16 @@ async def update_report_status(
     return ReportInDB(**report_data)
 
 # Organizations endpoints for super admin
-@app.get("/super-admin/organizations", response_model=List[Organization])
+@app.get("/super-admin/organizations", response_model=List[OrganizationResponse])
 async def get_all_organizations(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_super_admin)
 ):
-    return db.query(Organization).offset(skip).limit(limit).all()
-
+    organizations = db.query(Organization).offset(skip).limit(limit).all()
+    return organizations
+    
 @app.post("/super-admin/organizations", response_model=Organization)
 async def create_organization(
     organization: OrganizationCreate,
