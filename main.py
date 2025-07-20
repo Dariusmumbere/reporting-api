@@ -232,9 +232,21 @@ def init_default_admin():
     finally:
         db.close()
 
+def reset_database():
+    """Drops all tables and recreates them with initial data"""
+    # Drop all tables
+    Base.metadata.drop_all(bind=engine)
+    
+    # Create all tables
+    Base.metadata.create_all(bind=engine)
+    
+    # Initialize default admin user
+    init_default_admin()
+    
+    return {"message": "Database reset successfully"}
+
 # Reset database and initialize data
-Base.metadata.create_all(bind=engine)
-init_default_admin()
+reset_database()
 
 # Pydantic models
 class Token(BaseModel):
