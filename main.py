@@ -12,6 +12,11 @@ import os
 import uuid
 import json
 import asyncio
+import random
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from fastapi import BackgroundTasks
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
@@ -31,6 +36,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# Email configuration
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USERNAME = "dariusmumbere@gmail.com"
+SMTP_PASSWORD = "qsvx xbnd qymq msda"
+EMAIL_FROM = "ReportHub <noreply@reporthub.com>"
+OTP_EXPIRATION_MINUTES = 10
 
 # Utility functions
 def get_db():
@@ -66,6 +79,43 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+async def send_verification_email(email: str, otp: str):
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_FROM
+        msg['To'] = email
+        msg['Subject'] = "Verify your email for ReportHub"
+        
+        # Email body
+        body = f"""
+        <html>
+            <body>
+                <h2>ReportHub Email Verification</h2>
+                <p>Thank you for signing up with ReportHub!</p>
+                <p>Your verification code is: <strong>{otp}</strong></p>
+                <p>This code will expire in {OTP_EXPIRATION_MINUTES} minutes.</p>
+                <p>If you didn't request this, please ignore this email.</p>
+                <br>
+                <p>Best regards,</p>
+                <p>The ReportHub Team</p>
+            </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        # Connect to SMTP server and send email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+        
+        return True
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return False
 
 # Models
 class Organization(Base):
@@ -142,37 +192,15 @@ class ChatMessage(Base):
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
     recipient = relationship("User", foreign_keys=[recipient_id], back_populates="received_messages")
 
-# WebSocket Connection Manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: Dict[int, WebSocket] = {}
-        self.user_status: Dict[int, str] = {}
-
-    async def connect(self, websocket: WebSocket, user_id: int):
-        await websocket.accept()
-        self.active_connections[user_id] = websocket
-        self.user_status[user_id] = "online"
-        await self.broadcast_user_status(user_id, "online")
-
-    def disconnect(self, user_id: int):
-        if user_id in self.active_connections:
-            del self.active_connections[user_id]
-            self.user_status[user_id] = "offline"
-            asyncio.create_task(self.broadcast_user_status(user_id, "offline"))
-
-    async def send_personal_message(self, message: str, user_id: int):
-        if user_id in self.active_connections:
-            await self.active_connections[user_id].send_text(message)
-
-    async def broadcast_user_status(self, user_id: int, status: str):
-        for connection in self.active_connections.values():
-            await connection.send_text(json.dumps({
-                "type": "user_status",
-                "user_id": user_id,
-                "status": status
-            }))
-
-manager = ConnectionManager()
+class EmailVerification(Base):
+    __tablename__ = "email_verifications"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, index=True, nullable=False)
+    otp = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True))
+    is_verified = Column(Boolean, default=False)
 
 # Initialize default admin user
 def init_default_admin():
@@ -305,6 +333,13 @@ class ChatUser(BaseModel):
     status: str
     unread_count: int = 0
 
+class EmailVerificationRequest(BaseModel):
+    email: EmailStr
+
+class VerifyOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -367,6 +402,38 @@ os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 # Mount static files directory for attachments
 app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
+
+# WebSocket Connection Manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[int, WebSocket] = {}
+        self.user_status: Dict[int, str] = {}
+
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        self.user_status[user_id] = "online"
+        await self.broadcast_user_status(user_id, "online")
+
+    def disconnect(self, user_id: int):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            self.user_status[user_id] = "offline"
+            asyncio.create_task(self.broadcast_user_status(user_id, "offline"))
+
+    async def send_personal_message(self, message: str, user_id: int):
+        if user_id in self.active_connections:
+            await self.active_connections[user_id].send_text(message)
+
+    async def broadcast_user_status(self, user_id: int, status: str):
+        for connection in self.active_connections.values():
+            await connection.send_text(json.dumps({
+                "type": "user_status",
+                "user_id": user_id,
+                "status": status
+            }))
+
+manager = ConnectionManager()
 
 # WebSocket endpoint for chat
 @app.websocket("/ws/chat")
@@ -487,6 +554,67 @@ async def read_users_me(current_user: UserInDB = Depends(get_current_active_user
         user_data["organization_name"] = current_user.organization.name
     return UserInDB(**user_data)
 
+@app.post("/auth/send-verification-email")
+async def send_verification_email_endpoint(
+    email_request: EmailVerificationRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    # Check if email already exists
+    existing_user = get_user(db, email_request.email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Generate OTP (6-digit number)
+    otp = str(random.randint(100000, 999999))
+    
+    # Delete any existing OTPs for this email
+    db.query(EmailVerification).filter(
+        EmailVerification.email == email_request.email
+    ).delete()
+    
+    # Create new verification record
+    verification = EmailVerification(
+        email=email_request.email,
+        otp=otp,
+        expires_at=datetime.utcnow() + timedelta(minutes=OTP_EXPIRATION_MINUTES)
+    )
+    
+    db.add(verification)
+    db.commit()
+    
+    # Send email in background
+    background_tasks.add_task(send_verification_email, email_request.email, otp)
+    
+    return {"message": "Verification email sent"}
+
+@app.post("/auth/verify-otp")
+async def verify_otp(
+    otp_request: VerifyOTPRequest,
+    db: Session = Depends(get_db)
+):
+    # Find the verification record
+    verification = db.query(EmailVerification).filter(
+        EmailVerification.email == otp_request.email,
+        EmailVerification.otp == otp_request.otp,
+        EmailVerification.expires_at > datetime.utcnow()
+    ).first()
+    
+    if not verification:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP"
+        )
+    
+    # Mark as verified
+    verification.is_verified = True
+    db.commit()
+    
+    return {"message": "Email verified successfully"}
+
 @app.post("/auth/signup", response_model=Token)
 async def signup_user(
     name: str = Form(...),
@@ -500,6 +628,18 @@ async def signup_user(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
+        )
+    
+    # Check if email is verified
+    verification = db.query(EmailVerification).filter(
+        EmailVerification.email == email,
+        EmailVerification.is_verified == True
+    ).first()
+    
+    if not verification:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email not verified"
         )
     
     # Create user without organization (will be set later)
