@@ -233,6 +233,7 @@ def init_default_admin():
         db.close()
 
 # Reset database and initialize data
+Base.metadata.create_all(bind=engine)
 init_default_admin()
 
 # Pydantic models
