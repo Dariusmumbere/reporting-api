@@ -340,7 +340,20 @@ class EmailVerificationRequest(BaseModel):
 class VerifyOTPRequest(BaseModel):
     email: EmailStr
     otp: str
+    
+class OrganizationWithStats(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+    user_count: int
+    report_count: int
+    pending_reports: int
+    approved_reports: int
+    rejected_reports: int
 
+    class Config:
+        from_attributes = True
+        
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1171,3 +1184,76 @@ async def download_file(
         filename=attachment.name,
         media_type=attachment.type
     )
+@app.get("/organizations", response_model=List[OrganizationWithStats])
+async def get_organizations(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
+):
+    # Get all organizations
+    organizations = db.query(Organization).offset(skip).limit(limit).all()
+    
+    # Prepare response with statistics
+    orgs_with_stats = []
+    for org in organizations:
+        # Get user count
+        user_count = db.query(User).filter(User.organization_id == org.id).count()
+        
+        # Get report counts
+        reports = db.query(
+            Report.status,
+            func.count(Report.id).label('count')
+            .filter(Report.organization_id == org.id)
+            .group_by(Report.status)
+            .all()
+        
+        report_counts = {status: count for status, count in reports}
+        
+        orgs_with_stats.append({
+            "id": org.id,
+            "name": org.name,
+            "created_at": org.created_at,
+            "user_count": user_count,
+            "report_count": sum(report_counts.values()),
+            "pending_reports": report_counts.get("pending", 0),
+            "approved_reports": report_counts.get("approved", 0),
+            "rejected_reports": report_counts.get("rejected", 0)
+        })
+    
+    return orgs_with_stats
+
+# Get a single organization with statistics
+@app.get("/organizations/{org_id}", response_model=OrganizationWithStats)
+async def get_organization(
+    org_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_admin)
+):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
+    # Get user count
+    user_count = db.query(User).filter(User.organization_id == org.id).count()
+    
+    # Get report counts
+    reports = db.query(
+        Report.status,
+        func.count(Report.id).label('count')
+        .filter(Report.organization_id == org.id)
+        .group_by(Report.status)
+        .all()
+    
+    report_counts = {status: count for status, count in reports}
+    
+    return {
+        "id": org.id,
+        "name": org.name,
+        "created_at": org.created_at,
+        "user_count": user_count,
+        "report_count": sum(report_counts.values()),
+        "pending_reports": report_counts.get("pending", 0),
+        "approved_reports": report_counts.get("approved", 0),
+        "rejected_reports": report_counts.get("rejected", 0)
+    }
