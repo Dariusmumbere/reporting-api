@@ -163,7 +163,7 @@ class Report(Base):
 
     author = relationship("User", back_populates="reports")
     organization = relationship("Organization", back_populates="reports")
-    attachments = relationship("Attachment", back_populates="report
+    attachments = relationship("Attachment", back_populates="report")
 
 class OrganizationResponse(BaseModel):
     id: int
