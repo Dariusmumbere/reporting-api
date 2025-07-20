@@ -381,6 +381,11 @@ async def is_org_admin_or_super_admin(current_user: UserInDB = Depends(get_curre
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
+async def is_super_admin(current_user: UserInDB = Depends(get_current_active_user)):
+    if current_user.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Super admin privileges required")
+    return current_user
+
 # Initialize FastAPI app
 app = FastAPI(
     title="ReportHub API",
@@ -803,23 +808,24 @@ async def create_user(
 
 @app.get("/users", response_model=List[UserInDB])
 async def read_users(
-    skip: int = 0, 
+    skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Only show users from the same organization
-    users = db.query(User).filter(User.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
+    if current_user.role == "super_admin":
+        users = db.query(User).offset(skip).limit(limit).all()
+    else:
+        users = db.query(User).filter(
+            User.organization_id == current_user.organization_id
+        ).offset(skip).limit(limit).all()
     
-    # Convert to UserInDB with organization_name
-    users_data = []
-    for user in users:
-        user_data = user.__dict__
-        if user.organization:
-            user_data["organization_name"] = user.organization.name
-        users_data.append(UserInDB(**user_data))
-    
-    return users_data
+    return [
+        UserInDB(
+            **user.__dict__,
+            organization_name=user.organization.name if user.organization else None
+        ) for user in users
+    ]
 
 @app.get("/users/{user_id}", response_model=UserInDB)
 async def read_user(
@@ -1129,6 +1135,69 @@ async def update_report_status(
     ]
     
     return ReportInDB(**report_data)
+
+# Organizations endpoints for super admin
+@app.get("/super-admin/organizations", response_model=List[Organization])
+async def get_all_organizations(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    return db.query(Organization).offset(skip).limit(limit).all()
+
+@app.post("/super-admin/organizations", response_model=Organization)
+async def create_organization(
+    organization: OrganizationCreate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    db_org = Organization(name=organization.name)
+    db.add(db_org)
+    db.commit()
+    db.refresh(db_org)
+    return db_org
+
+# Users endpoints for super admin
+@app.get("/super-admin/users", response_model=List[UserInDB])
+async def get_all_users(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    users = db.query(User).offset(skip).limit(limit).all()
+    return [UserInDB(**user.__dict__, organization_name=user.organization.name if user.organization else None) for user in users]
+
+# Reports endpoints for super admin
+@app.get("/super-admin/reports", response_model=List[ReportInDB])
+async def get_all_reports(
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    query = db.query(Report)
+    if status:
+        query = query.filter(Report.status == status)
+    reports = query.offset(skip).limit(limit).all()
+    return [
+        ReportInDB(
+            **report.__dict__,
+            author_name=report.author.name,
+            organization_name=report.organization.name,
+            attachments=[
+                {
+                    "id": a.id,
+                    "name": a.name,
+                    "type": a.type,
+                    "size": a.size,
+                    "url": a.url
+                } for a in report.attachments
+            ]
+        ) for report in reports
+    ]
 
 @app.get("/auth/first-user")
 async def check_first_user(db: Session = Depends(get_db)):
