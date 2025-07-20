@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Body, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -215,13 +215,13 @@ def init_default_admin():
             db.commit()
             db.refresh(org)
             
-            # Create admin user
+            # Create super admin user
             hashed_password = get_password_hash("Admin123!")
             admin = User(
-                name="Admin User",
-                email="admin@reporthub.com",
+                name="Super Admin",
+                email="superadmin@reporthub.com",
                 hashed_password=hashed_password,
-                role="admin",
+                role="super_admin",
                 organization_id=org.id
             )
             db.add(admin)
@@ -319,6 +319,16 @@ class ReportStatusUpdate(BaseModel):
 class OrganizationCreate(BaseModel):
     name: str
 
+class OrganizationInDB(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+    user_count: int
+    report_count: int
+
+    class Config:
+        from_attributes = True
+
 class ChatMessageModel(BaseModel):
     id: int
     sender_id: int
@@ -376,8 +386,13 @@ async def is_admin(current_user: UserInDB = Depends(get_current_active_user)):
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
+async def is_super_admin(current_user: UserInDB = Depends(get_current_active_user)):
+    if current_user.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    return current_user
+
 async def is_org_admin_or_super_admin(current_user: UserInDB = Depends(get_current_active_user)):
-    if current_user.role != "admin":
+    if current_user.role not in ["admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
@@ -538,8 +553,8 @@ async def login_for_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
     
-    # Check if user has an organization
-    requires_org_registration = user.organization_id is None
+    # Check if user has an organization (except for super admin)
+    requires_org_registration = user.organization_id is None and user.role != "super_admin"
     
     return {
         "access_token": access_token, 
@@ -682,7 +697,7 @@ async def register_organization(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     # Check if user already has an organization
-    if current_user.organization_id is not None:
+    if current_user.organization_id is not None and current_user.role != "super_admin":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User already belongs to an organization"
@@ -702,13 +717,345 @@ async def register_organization(
     db.commit()
     db.refresh(db_org)
     
-    # Update user's organization and make them admin
-    current_user.organization_id = db_org.id
-    current_user.role = "admin"  # This is the key change - make them admin
-    db.commit()
-    db.refresh(current_user)
+    # Update user's organization if not super admin
+    if current_user.role != "super_admin":
+        current_user.organization_id = db_org.id
+        current_user.role = "admin"
+        db.commit()
+        db.refresh(current_user)
     
     return {"message": "Organization registered successfully"}
+
+# Super Admin routes
+@app.get("/super-admin/organizations", response_model=List[OrganizationInDB])
+async def get_all_organizations(
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    # Get all organizations with user and report counts
+    organizations = db.query(
+        Organization,
+        func.count(User.id).label("user_count"),
+        func.count(Report.id).label("report_count")
+    ).outerjoin(
+        User, User.organization_id == Organization.id
+    ).outerjoin(
+        Report, Report.organization_id == Organization.id
+    ).group_by(
+        Organization.id
+    ).offset(skip).limit(limit).all()
+
+    result = []
+    for org, user_count, report_count in organizations:
+        result.append(OrganizationInDB(
+            id=org.id,
+            name=org.name,
+            created_at=org.created_at,
+            user_count=user_count,
+            report_count=report_count
+        ))
+
+    return result
+
+@app.post("/super-admin/organizations", response_model=OrganizationInDB)
+async def create_organization(
+    organization: OrganizationCreate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    # Check if organization name already exists
+    existing_org = db.query(Organization).filter(Organization.name == organization.name).first()
+    if existing_org:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization name already exists"
+        )
+    
+    # Create new organization
+    db_org = Organization(name=organization.name)
+    db.add(db_org)
+    db.commit()
+    db.refresh(db_org)
+    
+    return OrganizationInDB(
+        id=db_org.id,
+        name=db_org.name,
+        created_at=db_org.created_at,
+        user_count=0,
+        report_count=0
+    )
+
+@app.delete("/super-admin/organizations/{org_id}")
+async def delete_organization(
+    org_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
+    # Delete all users and reports in the organization
+    db.query(User).filter(User.organization_id == org_id).delete()
+    db.query(Report).filter(Report.organization_id == org_id).delete()
+    
+    # Delete the organization
+    db.delete(org)
+    db.commit()
+    
+    return {"message": "Organization deleted successfully"}
+
+@app.get("/super-admin/users", response_model=List[UserInDB])
+async def get_all_users(
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    # Get all users with their organization names
+    users = db.query(User).join(
+        Organization, User.organization_id == Organization.id, isouter=True
+    ).offset(skip).limit(limit).all()
+    
+    users_data = []
+    for user in users:
+        user_data = user.__dict__
+        if user.organization:
+            user_data["organization_name"] = user.organization.name
+        users_data.append(UserInDB(**user_data))
+    
+    return users_data
+
+@app.post("/super-admin/users", response_model=UserInDB)
+async def create_user_as_super_admin(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    role: str = Form(...),
+    organization_id: int = Form(None),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    # Check if email already exists
+    existing_user = get_user(db, email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Validate role
+    if role not in ["super_admin", "admin", "staff"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid role"
+        )
+    
+    # Validate organization if not super admin
+    if role != "super_admin" and organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization is required for non-super admin users"
+        )
+    
+    if organization_id is not None:
+        org = db.query(Organization).filter(Organization.id == organization_id).first()
+        if not org:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization not found"
+            )
+    
+    # Create user
+    hashed_password = get_password_hash(password)
+    
+    db_user = User(
+        email=email,
+        name=name,
+        hashed_password=hashed_password,
+        role=role,
+        organization_id=organization_id
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # Include organization name in response
+    user_data = db_user.__dict__
+    if db_user.organization:
+        user_data["organization_name"] = db_user.organization.name
+    return UserInDB(**user_data)
+
+@app.delete("/super-admin/users/{user_id}")
+async def delete_user_as_super_admin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if db_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    db.delete(db_user)
+    db.commit()
+    
+    return {"message": "User deleted successfully"}
+
+@app.get("/super-admin/reports", response_model=List[ReportInDB])
+async def get_all_reports(
+    skip: int = 0,
+    limit: int = 10,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    # Get all reports with filters
+    query = db.query(Report).join(
+        User, Report.author_id == User.id
+    ).join(
+        Organization, Report.organization_id == Organization.id
+    )
+    
+    if status:
+        query = query.filter(Report.status == status)
+    
+    reports = query.offset(skip).limit(limit).all()
+    
+    # Format response with author and organization names
+    reports_data = []
+    for report in reports:
+        report_data = report.__dict__
+        report_data["author_name"] = report.author.name
+        report_data["organization_name"] = report.organization.name
+        
+        attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
+        report_data["attachments"] = [
+            {
+                "id": a.id,
+                "name": a.name,
+                "type": a.type,
+                "size": a.size,
+                "url": a.url
+            } for a in attachments
+        ]
+        
+        reports_data.append(ReportInDB(**report_data))
+    
+    return reports_data
+
+@app.patch("/super-admin/reports/{report_id}/status", response_model=ReportInDB)
+async def update_report_status_as_super_admin(
+    report_id: int,
+    status_update: ReportStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    report = db.query(Report).filter(Report.id == report_id).first()
+    
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Update status and comments
+    report.status = status_update.status
+    report.admin_comments = status_update.admin_comments
+    
+    db.commit()
+    db.refresh(report)
+    
+    # Add author and organization names to response
+    report_data = report.__dict__
+    report_data["author_name"] = report.author.name
+    report_data["organization_name"] = report.organization.name
+    
+    attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
+    report_data["attachments"] = [
+        {
+            "id": a.id,
+            "name": a.name,
+            "type": a.type,
+            "size": a.size,
+            "url": a.url
+        } for a in attachments
+    ]
+    
+    return ReportInDB(**report_data)
+
+@app.delete("/super-admin/reports/{report_id}")
+async def delete_report_as_super_admin(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    report = db.query(Report).filter(Report.id == report_id).first()
+    
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Delete attachments first
+    db.query(Attachment).filter(Attachment.report_id == report_id).delete()
+    
+    # Then delete the report
+    db.delete(report)
+    db.commit()
+    
+    return {"message": "Report deleted successfully"}
+
+@app.get("/super-admin/stats")
+async def get_super_admin_stats(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_super_admin)
+):
+    # Get total organizations count
+    total_organizations = db.query(func.count(Organization.id)).scalar()
+    
+    # Get total users count
+    total_users = db.query(func.count(User.id)).scalar()
+    
+    # Get total reports count
+    total_reports = db.query(func.count(Report.id)).scalar()
+    
+    # Get pending reports count
+    pending_reports = db.query(func.count(Report.id)).filter(
+        Report.status == "pending"
+    ).scalar()
+    
+    # Get recent organizations (last 5 created)
+    recent_orgs = db.query(Organization).order_by(
+        Organization.created_at.desc()
+    ).limit(5).all()
+    
+    # Format recent organizations data
+    recent_orgs_data = []
+    for org in recent_orgs:
+        user_count = db.query(func.count(User.id)).filter(
+            User.organization_id == org.id
+        ).scalar()
+        
+        report_count = db.query(func.count(Report.id)).filter(
+            Report.organization_id == org.id
+        ).scalar()
+        
+        recent_orgs_data.append({
+            "id": org.id,
+            "name": org.name,
+            "created_at": org.created_at,
+            "user_count": user_count,
+            "report_count": report_count
+        })
+    
+    return {
+        "total_organizations": total_organizations,
+        "total_users": total_users,
+        "total_reports": total_reports,
+        "pending_reports": pending_reports,
+        "recent_organizations": recent_orgs_data
+    }
 
 # Chat routes
 @app.get("/chat/users", response_model=List[ChatUser])
@@ -716,11 +1063,14 @@ async def get_chat_users(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Get all users in the same organization
-    users = db.query(User).filter(
-        User.organization_id == current_user.organization_id,
-        User.id != current_user.id
-    ).all()
+    # Get all users in the same organization (or all users for super admin)
+    if current_user.role == "super_admin":
+        users = db.query(User).filter(User.id != current_user.id).all()
+    else:
+        users = db.query(User).filter(
+            User.organization_id == current_user.organization_id,
+            User.id != current_user.id
+        ).all()
 
     # Get unread message counts
     unread_counts = db.query(
@@ -782,13 +1132,15 @@ async def create_user(
     
     hashed_password = get_password_hash(user.password)
     
-    # New users inherit the admin's organization
+    # New users inherit the admin's organization (unless super admin)
+    org_id = current_user.organization_id if current_user.role != "super_admin" else None
+    
     db_user = User(
         email=user.email,
         name=user.name,
         hashed_password=hashed_password,
         role=user.role,
-        organization_id=current_user.organization_id
+        organization_id=org_id
     )
     
     db.add(db_user)
@@ -808,8 +1160,14 @@ async def read_users(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
-    # Only show users from the same organization
-    users = db.query(User).filter(User.organization_id == current_user.organization_id).offset(skip).limit(limit).all()
+    # For super admin, show all users
+    if current_user.role == "super_admin":
+        users = db.query(User).offset(skip).limit(limit).all()
+    else:
+        # For org admin, only show users from the same organization
+        users = db.query(User).filter(
+            User.organization_id == current_user.organization_id
+        ).offset(skip).limit(limit).all()
     
     # Convert to UserInDB with organization_name
     users_data = []
@@ -827,10 +1185,16 @@ async def read_user(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
-    db_user = db.query(User).filter(
-        User.id == user_id,
-        User.organization_id == current_user.organization_id
-    ).first()
+    # For super admin, can view any user
+    if current_user.role == "super_admin":
+        db_user = db.query(User).filter(User.id == user_id).first()
+    else:
+        # For org admin, only users from the same organization
+        db_user = db.query(User).filter(
+            User.id == user_id,
+            User.organization_id == current_user.organization_id
+        ).first()
+    
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -849,10 +1213,16 @@ async def delete_user(
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     
-    db_user = db.query(User).filter(
-        User.id == user_id,
-        User.organization_id == current_user.organization_id
-    ).first()
+    # For super admin, can delete any user
+    if current_user.role == "super_admin":
+        db_user = db.query(User).filter(User.id == user_id).first()
+    else:
+        # For org admin, only users from the same organization
+        db_user = db.query(User).filter(
+            User.id == user_id,
+            User.organization_id == current_user.organization_id
+        ).first()
+    
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -871,8 +1241,8 @@ async def create_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Check if user has an organization
-    if current_user.organization_id is None:
+    # Check if user has an organization (unless super admin)
+    if current_user.organization_id is None and current_user.role != "super_admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User must belong to an organization to create reports"
@@ -884,7 +1254,7 @@ async def create_report(
         description=description,
         category=category,
         author_id=current_user.id,
-        organization_id=current_user.organization_id
+        organization_id=current_user.organization_id if current_user.role != "super_admin" else None
     )
     
     db.add(db_report)
@@ -928,7 +1298,10 @@ async def create_report(
     # Add author and organization names to response
     report_data = db_report.__dict__
     report_data["author_name"] = current_user.name
-    report_data["organization_name"] = current_user.organization.name
+    if db_report.organization:
+        report_data["organization_name"] = db_report.organization.name
+    else:
+        report_data["organization_name"] = "No Organization"
     report_data["attachments"] = saved_attachments
     
     return ReportInDB(**report_data)
@@ -937,18 +1310,29 @@ async def create_report(
 async def read_reports(
     skip: int = 0,
     limit: int = 100,
+    status: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Check if user has an organization
-    if current_user.organization_id is None:
-        return []
+    # For super admin, show all reports
+    if current_user.role == "super_admin":
+        query = db.query(Report)
+    else:
+        # Check if user has an organization
+        if current_user.organization_id is None:
+            return []
+        
+        # Only show reports from the same organization
+        query = db.query(Report).filter(
+            Report.organization_id == current_user.organization_id
+        )
+        
+        # For non-admin users, only show their own reports
+        if current_user.role != "admin":
+            query = query.filter(Report.author_id == current_user.id)
     
-    # Only show reports from the same organization
-    query = db.query(Report).filter(Report.organization_id == current_user.organization_id)
-    
-    if current_user.role != "admin":
-        query = query.filter(Report.author_id == current_user.id)
+    if status:
+        query = query.filter(Report.status == status)
     
     reports = query.offset(skip).limit(limit).all()
     
@@ -958,7 +1342,10 @@ async def read_reports(
         report_data = report.__dict__
         author = db.query(User).filter(User.id == report.author_id).first()
         report_data["author_name"] = author.name
-        report_data["organization_name"] = report.organization.name
+        if report.organization:
+            report_data["organization_name"] = report.organization.name
+        else:
+            report_data["organization_name"] = "No Organization"
         
         attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
         report_data["attachments"] = [
@@ -981,30 +1368,37 @@ async def read_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Check if user has an organization
-    if current_user.organization_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User must belong to an organization to view reports"
-        )
-    
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
+    # For super admin, can view any report
+    if current_user.role == "super_admin":
+        report = db.query(Report).filter(Report.id == report_id).first()
+    else:
+        # Check if user has an organization
+        if current_user.organization_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User must belong to an organization to view reports"
+            )
+        
+        report = db.query(Report).filter(
+            Report.id == report_id,
+            Report.organization_id == current_user.organization_id
+        ).first()
     
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    # Check permissions
-    if current_user.role != "admin" and report.author_id != current_user.id:
+    # Check permissions for non-admin users
+    if current_user.role != "admin" and current_user.role != "super_admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to access this report")
     
     # Add author and organization names to response
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
-    report_data["organization_name"] = report.organization.name
+    if report.organization:
+        report_data["organization_name"] = report.organization.name
+    else:
+        report_data["organization_name"] = "No Organization"
     
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
@@ -1027,10 +1421,14 @@ async def update_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
+    # For super admin, can update any report
+    if current_user.role == "super_admin":
+        report = db.query(Report).filter(Report.id == report_id).first()
+    else:
+        report = db.query(Report).filter(
+            Report.id == report_id,
+            Report.organization_id == current_user.organization_id
+        ).first()
     
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -1047,7 +1445,10 @@ async def update_report(
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
-    report_data["organization_name"] = report.organization.name
+    if report.organization:
+        report_data["organization_name"] = report.organization.name
+    else:
+        report_data["organization_name"] = "No Organization"
     
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
@@ -1068,16 +1469,20 @@ async def delete_report(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
+    # For super admin, can delete any report
+    if current_user.role == "super_admin":
+        report = db.query(Report).filter(Report.id == report_id).first()
+    else:
+        report = db.query(Report).filter(
+            Report.id == report_id,
+            Report.organization_id == current_user.organization_id
+        ).first()
     
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     
-    # Check permissions
-    if current_user.role != "admin" and report.author_id != current_user.id:
+    # Check permissions for non-admin users
+    if current_user.role != "admin" and current_user.role != "super_admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this report")
     
     # Delete attachments first
@@ -1096,10 +1501,14 @@ async def update_report_status(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
+    # For super admin, can update any report
+    if current_user.role == "super_admin":
+        report = db.query(Report).filter(Report.id == report_id).first()
+    else:
+        report = db.query(Report).filter(
+            Report.id == report_id,
+            Report.organization_id == current_user.organization_id
+        ).first()
     
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -1115,7 +1524,10 @@ async def update_report_status(
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
-    report_data["organization_name"] = report.organization.name
+    if report.organization:
+        report_data["organization_name"] = report.organization.name
+    else:
+        report_data["organization_name"] = "No Organization"
     
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
@@ -1152,6 +1564,14 @@ async def download_file(
     attachment = db.query(Attachment).filter(Attachment.url == f"/attachments/{filename}").first()
     if not attachment:
         raise HTTPException(status_code=404, detail="File record not found")
+    
+    # For super admin, allow access to any file
+    if current_user.role == "super_admin":
+        return FileResponse(
+            file_path,
+            filename=attachment.name,
+            media_type=attachment.type
+        )
     
     # Check if report belongs to user's organization
     report = db.query(Report).filter(
