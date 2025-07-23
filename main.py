@@ -186,10 +186,9 @@ class ChatMessage(Base):
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     recipient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     content = Column(String, nullable=False)
-    audio_url = Column(String)  # Add this
-    audio_duration = Column(Integer)  # Add this
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     status = Column(String, default="delivered")  # delivered, read
+    message_type = Column(String, default="text")  # text, voice
 
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
     recipient = relationship("User", foreign_keys=[recipient_id], back_populates="received_messages")
@@ -204,23 +203,6 @@ class EmailVerification(Base):
     expires_at = Column(DateTime(timezone=True))
     is_verified = Column(Boolean, default=False)
 
-def add_audio_columns():
-    with engine.connect() as connection:
-        try:
-            connection.execute(text("""
-                ALTER TABLE chat_messages 
-                ADD COLUMN IF NOT EXISTS audio_url VARCHAR
-            """))
-            connection.execute(text("""
-                ALTER TABLE chat_messages 
-                ADD COLUMN IF NOT EXISTS audio_duration INTEGER
-            """))
-            connection.commit()
-            print("Successfully added audio columns")
-        except Exception as e:
-            print(f"Error adding columns: {e}")
-            connection.rollback()
-add_audio_columns()
 # Initialize default admin user
 def init_default_admin():
     db = SessionLocal()
@@ -352,8 +334,6 @@ class ChatMessageModel(BaseModel):
     sender_id: int
     recipient_id: int
     content: str
-    audio_url: Optional[str] = None
-    duration: Optional[int] = None
     timestamp: datetime
     status: str
 
@@ -436,12 +416,8 @@ app.add_middleware(
 ATTACHMENTS_DIR = "attachments"
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
-VOICE_DIR = "voice_messages"
-os.makedirs(VOICE_DIR, exist_ok=True)
-
 # Mount static files directory for attachments
 app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
-app.mount("/voice_messages", StaticFiles(directory="voice_messages"), name="voice_messages")
 
 # WebSocket Connection Manager
 class ConnectionManager:
@@ -516,29 +492,51 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
             message = json.loads(data)
 
             if message["type"] == "message":
-                # Save message to database
-                db_message = ChatMessage(
-                    sender_id=user.id,
-                    recipient_id=message["recipient_id"],
-                    content=message["content"],
-                    timestamp=datetime.utcnow(),
-                    status="delivered"
-                )
+                # Handle both text and voice messages
+                if message.get("is_voice_message"):
+                    # Save voice message to database
+                    db_message = ChatMessage(
+                        sender_id=user.id,
+                        recipient_id=message["recipient_id"],
+                        content=message["content"],  # This should be the URL to the audio file
+                        timestamp=datetime.utcnow(),
+                        status="delivered",
+                        message_type="voice"
+                    )
+                else:
+                    # Save text message to database
+                    db_message = ChatMessage(
+                        sender_id=user.id,
+                        recipient_id=message["recipient_id"],
+                        content=message["content"],
+                        timestamp=datetime.utcnow(),
+                        status="delivered",
+                        message_type="text"
+                    )
+                
                 db.add(db_message)
                 db.commit()
                 db.refresh(db_message)
 
+                # Prepare response message
+                response_message = {
+                    "id": db_message.id,
+                    "sender_id": db_message.sender_id,
+                    "recipient_id": db_message.recipient_id,
+                    "content": db_message.content,
+                    "timestamp": db_message.timestamp.isoformat(),
+                    "status": db_message.status,
+                    "message_type": db_message.message_type
+                }
+
+                # Add duration for voice messages
+                if message.get("is_voice_message"):
+                    response_message["duration"] = message.get("duration", 0)
+
                 # Send to recipient if online
                 await manager.send_personal_message(json.dumps({
                     "type": "message",
-                    "message": {
-                        "id": db_message.id,
-                        "sender_id": db_message.sender_id,
-                        "recipient_id": db_message.recipient_id,
-                        "content": db_message.content,
-                        "timestamp": db_message.timestamp.isoformat(),
-                        "status": db_message.status
-                    }
+                    "message": response_message
                 }), message["recipient_id"])
 
             elif message["type"] == "mark_read":
@@ -550,6 +548,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                 ).update({"status": "read"})
                 db.commit()
 
+            elif message["type"] == "voice_message_played":
+                # Update message status when voice message is played
+                db.query(ChatMessage).filter(
+                    ChatMessage.id == message["message_id"],
+                    ChatMessage.recipient_id == user.id
+                ).update({"status": "read"})
+                db.commit()
+
     except WebSocketDisconnect:
         manager.disconnect(user.id)
     except Exception as e:
@@ -557,7 +563,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
         manager.disconnect(user.id)
     finally:
         db.close()
-
 # Auth routes
 @app.post("/auth/login", response_model=Token)
 async def login_for_access_token(
@@ -1615,69 +1620,55 @@ async def download_file(
         filename=attachment.name,
         media_type=attachment.type
     )
-
-@app.post("/chat/upload-voice")
+@app.post("/chat/voice-message")
 async def upload_voice_message(
-    audio: UploadFile = File(...),
+    voice_message: UploadFile = File(...),
     recipient_id: int = Form(...),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Create directory for voice messages if it doesn't exist
-    VOICE_DIR = "voice_messages"
-    os.makedirs(VOICE_DIR, exist_ok=True)
-    
-    # Generate a unique filename with .wav extension
-    filename = f"{uuid.uuid4()}.wav"
-    file_path = os.path.join(VOICE_DIR, filename)
-    
-    # Save the file
-    with open(file_path, "wb") as buffer:
-        buffer.write(await audio.read())
-    
-    # Get audio duration using wave module
     try:
-        import wave
-        with wave.open(file_path, 'r') as wav_file:
-            frames = wav_file.getnframes()
-            rate = wav_file.getframerate()
-            duration = frames / float(rate)
-    except Exception as e:
-        print(f"Error getting duration: {e}")
-        duration = 0
-    
-    file_url = f"/voice_messages/{filename}"
-    
-    # Save message to database
-    db_message = ChatMessage(
-        sender_id=current_user.id,
-        recipient_id=recipient_id,
-        content="[Voice message]",
-        audio_url=file_url,
-        audio_duration=int(duration),
-        timestamp=datetime.utcnow(),
-        status="delivered"
-    )
-    db.add(db_message)
-    db.commit()
-    db.refresh(db_message)
-    
-    # Send to recipient via WebSocket if online
-    await manager.send_personal_message(json.dumps({
-        "type": "message",
-        "message": {
+        # Create a unique filename
+        file_ext = os.path.splitext(voice_message.filename)[1]
+        filename = f"voice_{uuid.uuid4()}{file_ext}"
+        file_path = os.path.join(ATTACHMENTS_DIR, filename)
+        
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            content = await voice_message.read()
+            buffer.write(content)
+        
+        file_url = f"/attachments/{filename}"
+        
+        # Get audio duration (you'll need to install a library like pydub)
+        try:
+            audio = AudioSegment.from_file(file_path)
+            duration = len(audio) / 1000  # Convert to seconds
+        except:
+            duration = 0
+        
+        # Save message to database
+        db_message = ChatMessage(
+            sender_id=current_user.id,
+            recipient_id=recipient_id,
+            content=f"[VOICE_MESSAGE]{file_url}",
+            timestamp=datetime.utcnow(),
+            status="delivered",
+            message_type="voice"
+        )
+        db.add(db_message)
+        db.commit()
+        db.refresh(db_message)
+        
+        return {
             "id": db_message.id,
             "sender_id": db_message.sender_id,
             "recipient_id": db_message.recipient_id,
-            "content": db_message.content,
-            "audio_url": db_message.audio_url,
-            "duration": db_message.audio_duration,
+            "audio_url": file_url,
+            "duration": duration,
             "timestamp": db_message.timestamp.isoformat(),
             "status": db_message.status
         }
-    }), recipient_id)
-    
-    return {
-        "audio_url": file_url,
-        "duration": duration
-    }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
