@@ -1623,7 +1623,7 @@ async def upload_voice_message(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Create a directory for voice messages if it doesn't exist
+    # Create directory for voice messages if it doesn't exist
     VOICE_DIR = "voice_messages"
     os.makedirs(VOICE_DIR, exist_ok=True)
     
@@ -1635,7 +1635,7 @@ async def upload_voice_message(
     with open(file_path, "wb") as buffer:
         buffer.write(await audio.read())
     
-    # Get audio duration using wave module (no need for ffmpeg)
+    # Get audio duration using wave module
     try:
         import wave
         with wave.open(file_path, 'r') as wav_file:
