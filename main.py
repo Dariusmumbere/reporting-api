@@ -204,6 +204,23 @@ class EmailVerification(Base):
     expires_at = Column(DateTime(timezone=True))
     is_verified = Column(Boolean, default=False)
 
+def add_audio_columns():
+    with engine.connect() as connection:
+        try:
+            connection.execute(text("""
+                ALTER TABLE chat_messages 
+                ADD COLUMN IF NOT EXISTS audio_url VARCHAR
+            """))
+            connection.execute(text("""
+                ALTER TABLE chat_messages 
+                ADD COLUMN IF NOT EXISTS audio_duration INTEGER
+            """))
+            connection.commit()
+            print("Successfully added audio columns")
+        except Exception as e:
+            print(f"Error adding columns: {e}")
+            connection.rollback()
+add_audio_columns()
 # Initialize default admin user
 def init_default_admin():
     db = SessionLocal()
