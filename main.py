@@ -186,6 +186,8 @@ class ChatMessage(Base):
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     recipient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     content = Column(String, nullable=False)
+    audio_url = Column(String)  # Add this
+    audio_duration = Column(Integer)  # Add this
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     status = Column(String, default="delivered")  # delivered, read
 
@@ -333,6 +335,8 @@ class ChatMessageModel(BaseModel):
     sender_id: int
     recipient_id: int
     content: str
+    audio_url: Optional[str] = None
+    duration: Optional[int] = None
     timestamp: datetime
     status: str
 
@@ -417,6 +421,7 @@ os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 # Mount static files directory for attachments
 app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
+app.mount("/voice_messages", StaticFiles(directory="voice_messages"), name="voice_messages")
 
 # WebSocket Connection Manager
 class ConnectionManager:
@@ -1590,3 +1595,66 @@ async def download_file(
         filename=attachment.name,
         media_type=attachment.type
     )
+@app.post("/chat/upload-voice")
+async def upload_voice_message(
+    audio: UploadFile = File(...),
+    recipient_id: int = Form(...),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Create a directory for voice messages if it doesn't exist
+    VOICE_DIR = "voice_messages"
+    os.makedirs(VOICE_DIR, exist_ok=True)
+    
+    # Generate a unique filename
+    file_ext = os.path.splitext(audio.filename)[1]
+    filename = f"{uuid.uuid4()}{file_ext}"
+    file_path = os.path.join(VOICE_DIR, filename)
+    
+    # Save the file
+    with open(file_path, "wb") as buffer:
+        buffer.write(await audio.read())
+    
+    # Get audio duration (you'll need to install ffmpeg-python for this)
+    try:
+        import ffmpeg
+        probe = ffmpeg.probe(file_path)
+        duration = float(probe['format']['duration'])
+    except:
+        duration = 0
+    
+    file_url = f"/voice_messages/{filename}"
+    
+    # Save message to database
+    db_message = ChatMessage(
+        sender_id=current_user.id,
+        recipient_id=recipient_id,
+        content="[Voice message]",
+        audio_url=file_url,
+        audio_duration=duration,
+        timestamp=datetime.utcnow(),
+        status="delivered"
+    )
+    db.add(db_message)
+    db.commit()
+    db.refresh(db_message)
+    
+    # Send to recipient via WebSocket if online
+    await manager.send_personal_message(json.dumps({
+        "type": "message",
+        "message": {
+            "id": db_message.id,
+            "sender_id": db_message.sender_id,
+            "recipient_id": db_message.recipient_id,
+            "content": db_message.content,
+            "audio_url": db_message.audio_url,
+            "duration": db_message.audio_duration,
+            "timestamp": db_message.timestamp.isoformat(),
+            "status": db_message.status
+        }
+    }), recipient_id)
+    
+    return {
+        "audio_url": file_url,
+        "duration": duration
+    }
