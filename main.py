@@ -1615,6 +1615,7 @@ async def download_file(
         filename=attachment.name,
         media_type=attachment.type
     )
+
 @app.post("/chat/upload-voice")
 async def upload_voice_message(
     audio: UploadFile = File(...),
@@ -1626,21 +1627,23 @@ async def upload_voice_message(
     VOICE_DIR = "voice_messages"
     os.makedirs(VOICE_DIR, exist_ok=True)
     
-    # Generate a unique filename
-    file_ext = os.path.splitext(audio.filename)[1]
-    filename = f"{uuid.uuid4()}{file_ext}"
+    # Generate a unique filename with .wav extension
+    filename = f"{uuid.uuid4()}.wav"
     file_path = os.path.join(VOICE_DIR, filename)
     
     # Save the file
     with open(file_path, "wb") as buffer:
         buffer.write(await audio.read())
     
-    # Get audio duration (you'll need to install ffmpeg-python for this)
+    # Get audio duration using wave module (no need for ffmpeg)
     try:
-        import ffmpeg
-        probe = ffmpeg.probe(file_path)
-        duration = float(probe['format']['duration'])
-    except:
+        import wave
+        with wave.open(file_path, 'r') as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+            duration = frames / float(rate)
+    except Exception as e:
+        print(f"Error getting duration: {e}")
         duration = 0
     
     file_url = f"/voice_messages/{filename}"
@@ -1651,7 +1654,7 @@ async def upload_voice_message(
         recipient_id=recipient_id,
         content="[Voice message]",
         audio_url=file_url,
-        audio_duration=duration,
+        audio_duration=int(duration),
         timestamp=datetime.utcnow(),
         status="delivered"
     )
