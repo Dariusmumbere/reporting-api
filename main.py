@@ -419,6 +419,9 @@ app.add_middleware(
 ATTACHMENTS_DIR = "attachments"
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
+VOICE_DIR = "voice_messages"
+os.makedirs(VOICE_DIR, exist_ok=True)
+
 # Mount static files directory for attachments
 app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
 app.mount("/voice_messages", StaticFiles(directory="voice_messages"), name="voice_messages")
