@@ -233,37 +233,9 @@ def init_default_admin():
     finally:
         db.close()
 
-def fix_chat_messages_table():
-    db = SessionLocal()
-    try:
-        # Check if the column exists
-        column_exists = db.execute(text("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='chat_messages' AND column_name='message_type'
-        """)).fetchone()
 
-        if not column_exists:
-            # Option 1: Add the missing column
-            db.execute(text("""
-                ALTER TABLE chat_messages 
-                ADD COLUMN message_type VARCHAR DEFAULT 'text'
-            """))
-            db.commit()
-            print("Added message_type column to chat_messages table")
-            
-            # Alternatively, if you don't need this column, you could modify your model instead
-            # by removing the message_type field from the ChatMessage class
-    except Exception as e:
-        db.rollback()
-        print(f"Error fixing chat_messages table: {e}")
-        raise
-    finally:
-        db.close()
-        
 # Reset database and initialize data
 init_default_admin()
-fix_chat_messages_table()
 
 # Pydantic models
 class Token(BaseModel):
