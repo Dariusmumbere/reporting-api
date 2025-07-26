@@ -234,9 +234,37 @@ def init_default_admin():
     finally:
         db.close()
 
+def add_logo_url_column(db: Session):
+    """
+    Adds the logo_url column to the organizations table if it doesn't exist
+    """
+    try:
+        # Check if the column already exists
+        result = db.execute(
+            text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='organizations' AND column_name='logo_url'
+            """)
+        ).fetchone()
 
+        if not result:
+            # Column doesn't exist, add it
+            db.execute(
+                text("ALTER TABLE organizations ADD COLUMN logo_url VARCHAR")
+            )
+            db.commit()
+            print("Successfully added logo_url column to organizations table")
+        else:
+            print("logo_url column already exists in organizations table")
+            
+    except Exception as e:
+        db.rollback()
+        print(f"Error adding logo_url column: {str(e)}")
+        raise
 # Reset database and initialize data
 init_default_admin()
+add_logo_url_column()
 
 # Pydantic models
 class Token(BaseModel):
