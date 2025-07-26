@@ -21,6 +21,22 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import text
+import boto3
+from botocore.exceptions import ClientError
+
+# Backblaze B2 Configuration
+B2_BUCKET_NAME = "mdarius256"
+B2_ENDPOINT_URL = "https://s3.us-east-005.backblazeb2.com"
+B2_KEY_ID = "005ca7845641d300000000001"
+B2_APPLICATION_KEY = "K005LiL1PGMJp9dwDGLcrkqI1qDM/ic"
+
+# Initialize B2 client
+b2_client = boto3.client(
+    's3',
+    endpoint_url=B2_ENDPOINT_URL,
+    aws_access_key_id=B2_KEY_ID,
+    aws_secret_access_key=B2_APPLICATION_KEY
+)
 
 # Database configuration
 DATABASE_URL = "postgresql://reporting_wlcd_user:sYC2WmtyjDCjyxvCPjoRNYAH4OCpVp6L@dpg-d1p23rc9c44c738581ig-a/reporting_wlcd"
@@ -117,13 +133,46 @@ async def send_verification_email(email: str, otp: str):
         print(f"Error sending email: {e}")
         return False
 
-# Models
+async def upload_to_b2(file: UploadFile, file_path: str) -> str:
+    """Upload a file to Backblaze B2 and return the public URL"""
+    try:
+        # Generate a unique filename
+        file_ext = os.path.splitext(file.filename)[1]
+        filename = f"{uuid.uuid4()}{file_ext}"
+        object_key = f"attachments/{filename}"
+        
+        # Upload the file
+        b2_client.upload_fileobj(
+            file.file,
+            B2_BUCKET_NAME,
+            object_key,
+            ExtraArgs={'ContentType': file.content_type}
+        )
+        
+        # Generate the public URL
+        public_url = f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/{object_key}"
+        return public_url
+    except Exception as e:
+        print(f"Error uploading to B2: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload file")
+
+async def delete_from_b2(url: str):
+    """Delete a file from Backblaze B2"""
+    try:
+        # Extract the object key from the URL
+        object_key = url.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
+        b2_client.delete_object(Bucket=B2_BUCKET_NAME, Key=object_key)
+    except Exception as e:
+        print(f"Error deleting from B2: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete file")
+
+# Models (remain the same as before)
 class Organization(Base):
     __tablename__ = "organizations"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
-    logo_url = Column(String, nullable=True)  # Add this line
+    logo_url = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     users = relationship("User", back_populates="organization")
@@ -256,12 +305,11 @@ def add_logo_url_column():
     finally:
         db.close()
 
-
 # Reset database and initialize data
 init_default_admin()
 add_logo_url_column()
 
-# Pydantic models
+# Pydantic models (remain the same as before)
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -347,7 +395,7 @@ class OrganizationCreate(BaseModel):
 class OrganizationInDB(BaseModel):
     id: int
     name: str
-    logo_url: Optional[str] = None  # Add this line
+    logo_url: Optional[str] = None
     created_at: datetime
     user_count: int
     report_count: int
@@ -437,13 +485,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Create attachments directory if it doesn't exist
-ATTACHMENTS_DIR = "attachments"
-os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
-
-# Mount static files directory for attachments
-app.mount("/attachments", StaticFiles(directory=ATTACHMENTS_DIR), name="attachments")
 
 # WebSocket Connection Manager
 class ConnectionManager:
@@ -589,6 +630,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
         manager.disconnect(user.id)
     finally:
         db.close()
+
 # Auth routes
 @app.post("/auth/login", response_model=Token)
 async def login_for_access_token(
@@ -1053,6 +1095,13 @@ async def delete_report_as_super_admin(
         raise HTTPException(status_code=404, detail="Report not found")
     
     # Delete attachments first
+    attachments = db.query(Attachment).filter(Attachment.report_id == report_id).all()
+    for attachment in attachments:
+        try:
+            await delete_from_b2(attachment.url)
+        except Exception as e:
+            print(f"Failed to delete attachment from B2: {e}")
+    
     db.query(Attachment).filter(Attachment.report_id == report_id).delete()
     
     # Then delete the report
@@ -1319,34 +1368,30 @@ async def create_report(
     # Handle attachments
     saved_attachments = []
     for attachment in attachments:
-        # Generate unique filename
-        file_ext = os.path.splitext(attachment.filename)[1]
-        filename = f"{uuid.uuid4()}{file_ext}"
-        file_path = os.path.join(ATTACHMENTS_DIR, filename)
-        
-        # Save the file
-        with open(file_path, "wb") as buffer:
-            buffer.write(await attachment.read())
-        
-        file_url = f"/attachments/{filename}"
-        
-        db_attachment = Attachment(
-            name=attachment.filename,
-            type=attachment.content_type,
-            size=attachment.size,
-            url=file_url,
-            report_id=db_report.id,
-            uploader_id=current_user.id
-        )
-        
-        db.add(db_attachment)
-        saved_attachments.append({
-            "id": db_attachment.id,
-            "name": db_attachment.name,
-            "type": db_attachment.type,
-            "size": db_attachment.size,
-            "url": db_attachment.url
-        })
+        try:
+            # Upload to Backblaze B2
+            file_url = await upload_to_b2(attachment, f"reports/{db_report.id}")
+            
+            db_attachment = Attachment(
+                name=attachment.filename,
+                type=attachment.content_type,
+                size=attachment.size,
+                url=file_url,
+                report_id=db_report.id,
+                uploader_id=current_user.id
+            )
+            
+            db.add(db_attachment)
+            saved_attachments.append({
+                "id": db_attachment.id,
+                "name": db_attachment.name,
+                "type": db_attachment.type,
+                "size": db_attachment.size,
+                "url": db_attachment.url
+            })
+        except Exception as e:
+            print(f"Error processing attachment: {e}")
+            continue
     
     db.commit()
     
@@ -1541,6 +1586,13 @@ async def delete_report(
         raise HTTPException(status_code=403, detail="Not authorized to delete this report")
     
     # Delete attachments first
+    attachments = db.query(Attachment).filter(Attachment.report_id == report_id).all()
+    for attachment in attachments:
+        try:
+            await delete_from_b2(attachment.url)
+        except Exception as e:
+            print(f"Failed to delete attachment from B2: {e}")
+    
     db.query(Attachment).filter(Attachment.report_id == report_id).delete()
     
     # Then delete the report
@@ -1602,76 +1654,17 @@ async def check_first_user(db: Session = Depends(get_db)):
     user_count = db.query(User).count()
     return {"is_first_user": user_count == 0}
 
-@app.get("/download/{filename}")
-async def download_file(
-    filename: str,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    # Verify the file exists and the user has access to it
-    file_path = os.path.join(ATTACHMENTS_DIR, filename)
-    
-    # Check if file exists
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Check if user has access to this file (either admin or owner of the report)
-    attachment = db.query(Attachment).filter(Attachment.url == f"/attachments/{filename}").first()
-    if not attachment:
-        raise HTTPException(status_code=404, detail="File record not found")
-    
-    # For super admin, allow access to any file
-    if current_user.role == "super_admin":
-        return FileResponse(
-            file_path,
-            filename=attachment.name,
-            media_type=attachment.type
-        )
-    
-    # Check if report belongs to user's organization
-    report = db.query(Report).filter(
-        Report.id == attachment.report_id,
-        Report.organization_id == current_user.organization_id
-    ).first()
-    
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    
-    if current_user.role != "admin" and report.author_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this file")
-    
-    # Return the file with the original filename
-    return FileResponse(
-        file_path,
-        filename=attachment.name,
-        media_type=attachment.type
-    )
 @app.post("/chat/voice-message")
 async def upload_voice_message(
     voice_message: UploadFile = File(...),
     recipient_id: int = Form(...),
+    duration: float = Form(...),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
-        # Create a unique filename
-        file_ext = os.path.splitext(voice_message.filename)[1]
-        filename = f"voice_{uuid.uuid4()}{file_ext}"
-        file_path = os.path.join(ATTACHMENTS_DIR, filename)
-        
-        # Save the file
-        with open(file_path, "wb") as buffer:
-            content = await voice_message.read()
-            buffer.write(content)
-        
-        file_url = f"/attachments/{filename}"
-        
-        # Get audio duration (you'll need to install a library like pydub)
-        try:
-            audio = AudioSegment.from_file(file_path)
-            duration = len(audio) / 1000  # Convert to seconds
-        except:
-            duration = 0
+        # Upload the voice message to B2
+        file_url = await upload_to_b2(voice_message, f"voice_messages/{current_user.id}")
         
         # Save message to database
         db_message = ChatMessage(
@@ -1682,23 +1675,23 @@ async def upload_voice_message(
             status="delivered",
             message_type="voice"
         )
+        
         db.add(db_message)
         db.commit()
         db.refresh(db_message)
-        
+
         return {
             "id": db_message.id,
             "sender_id": db_message.sender_id,
             "recipient_id": db_message.recipient_id,
-            "audio_url": file_url,
-            "duration": duration,
+            "content": db_message.content,
             "timestamp": db_message.timestamp.isoformat(),
-            "status": db_message.status
+            "status": db_message.status,
+            "message_type": db_message.message_type,
+            "duration": duration
         }
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-# Add these endpoints to your FastAPI app
 
 @app.get("/organization", response_model=OrganizationInDB)
 async def get_organization_details(
@@ -1770,33 +1763,24 @@ async def update_organization(
     
     # Handle logo upload if provided
     if logo is not None:
-        # Validate file type
-        if not logo.content_type.startswith('image/'):
+        try:
+            # Upload new logo to B2
+            file_url = await upload_to_b2(logo, "organization_logos")
+            
+            # Delete old logo if it exists
+            if org.logo_url:
+                try:
+                    await delete_from_b2(org.logo_url)
+                except Exception as e:
+                    print(f"Error deleting old logo from B2: {e}")
+            
+            org.logo_url = file_url
+            updated = True
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only image files are allowed for logo"
+                detail=f"Failed to upload logo: {str(e)}"
             )
-        
-        # Generate unique filename
-        file_ext = os.path.splitext(logo.filename)[1]
-        filename = f"org_logo_{uuid.uuid4()}{file_ext}"
-        file_path = os.path.join(ATTACHMENTS_DIR, filename)
-        
-        # Save the file
-        with open(file_path, "wb") as buffer:
-            buffer.write(await logo.read())
-        
-        # Delete old logo if it exists
-        if org.logo_url:
-            old_logo_path = os.path.join(ATTACHMENTS_DIR, org.logo_url.split('/')[-1])
-            try:
-                if os.path.exists(old_logo_path):
-                    os.remove(old_logo_path)
-            except Exception as e:
-                print(f"Error deleting old logo: {e}")
-        
-        org.logo_url = f"/attachments/{filename}"
-        updated = True
     
     if updated:
         db.commit()
