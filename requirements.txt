@@ -11,3 +11,5 @@ pydantic-settings
 pydantic[email]
 bcrypt
 websockets
+boto3 
+botocore
