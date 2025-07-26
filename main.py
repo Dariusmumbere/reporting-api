@@ -264,7 +264,7 @@ def add_logo_url_column(db: Session):
         raise
 # Reset database and initialize data
 init_default_admin()
-add_logo_url_column()
+add_logo_url_column(db)
 
 # Pydantic models
 class Token(BaseModel):
