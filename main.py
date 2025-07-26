@@ -27,8 +27,8 @@ from botocore.exceptions import ClientError
 # Backblaze B2 Configuration
 B2_BUCKET_NAME = "mdarius256"
 B2_ENDPOINT_URL = "https://s3.us-east-005.backblazeb2.com"
-B2_KEY_ID = "005ca7845641d300000000001"
-B2_APPLICATION_KEY = "K005LiL1PGMJp9dwDGLcrkqI1qDM/ic"
+B2_KEY_ID = "5ca7845641d3"
+B2_APPLICATION_KEY = "0055ca7845641d30000000001"
 
 # Initialize B2 client
 b2_client = boto3.client(
