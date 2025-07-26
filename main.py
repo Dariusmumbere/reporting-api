@@ -123,11 +123,12 @@ class Organization(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
+    logo_url = Column(String, nullable=True)  # Add this line
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     users = relationship("User", back_populates="organization")
     reports = relationship("Report", back_populates="organization")
-
+    
 class User(Base):
     __tablename__ = "users"
 
@@ -323,6 +324,7 @@ class OrganizationCreate(BaseModel):
 class OrganizationInDB(BaseModel):
     id: int
     name: str
+    logo_url: Optional[str] = None  # Add this line
     created_at: datetime
     user_count: int
     report_count: int
@@ -1673,3 +1675,108 @@ async def upload_voice_message(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+# Add these endpoints to your FastAPI app
+
+@app.get("/organization", response_model=OrganizationInDB)
+async def get_organization_details(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    if current_user.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User does not belong to an organization"
+        )
+    
+    org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
+    # Get user and report counts
+    user_count = db.query(func.count(User.id)).filter(
+        User.organization_id == org.id
+    ).scalar()
+    
+    report_count = db.query(func.count(Report.id)).filter(
+        Report.organization_id == org.id
+    ).scalar()
+    
+    return OrganizationInDB(
+        id=org.id,
+        name=org.name,
+        logo_url=org.logo_url,
+        created_at=org.created_at,
+        user_count=user_count,
+        report_count=report_count
+    )
+
+@app.patch("/organization")
+async def update_organization(
+    name: Optional[str] = Form(None),
+    logo: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
+):
+    if current_user.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User does not belong to an organization"
+        )
+    
+    org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
+    updated = False
+    
+    # Update name if provided
+    if name is not None and name != org.name:
+        # Check if name is already taken
+        existing_org = db.query(Organization).filter(
+            Organization.name == name,
+            Organization.id != org.id
+        ).first()
+        if existing_org:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization name already exists"
+            )
+        
+        org.name = name
+        updated = True
+    
+    # Handle logo upload if provided
+    if logo is not None:
+        # Validate file type
+        if not logo.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only image files are allowed for logo"
+            )
+        
+        # Generate unique filename
+        file_ext = os.path.splitext(logo.filename)[1]
+        filename = f"org_logo_{uuid.uuid4()}{file_ext}"
+        file_path = os.path.join(ATTACHMENTS_DIR, filename)
+        
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            buffer.write(await logo.read())
+        
+        # Delete old logo if it exists
+        if org.logo_url:
+            old_logo_path = os.path.join(ATTACHMENTS_DIR, org.logo_url.split('/')[-1])
+            try:
+                if os.path.exists(old_logo_path):
+                    os.remove(old_logo_path)
+            except Exception as e:
+                print(f"Error deleting old logo: {e}")
+        
+        org.logo_url = f"/attachments/{filename}"
+        updated = True
+    
+    if updated:
+        db.commit()
+        db.refresh(org)
+    
+    return {"message": "Organization updated successfully"}
