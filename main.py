@@ -25,10 +25,10 @@ import boto3
 from botocore.exceptions import ClientError
 
 # Backblaze B2 Configuration
-B2_BUCKET_NAME = "256-256"
+B2_BUCKET_NAME = "uploads-dir"
 B2_ENDPOINT_URL = "https://s3.us-east-005.backblazeb2.com"
-B2_KEY_ID = "5ca7845641d3"
-B2_APPLICATION_KEY = "0056c87f4b62022cc31fff83e42073b124680c4844"
+B2_KEY_ID = "0055ca7845641d30000000002"
+B2_APPLICATION_KEY = "K005NNeGM9r28ujQ3jvNEQy2zUiu0TI"
 
 # Initialize B2 client
 b2_client = boto3.client(
