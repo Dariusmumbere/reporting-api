@@ -542,6 +542,8 @@ async def is_org_admin_or_super_admin(current_user: UserInDB = Depends(get_curre
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
+Base.metadata.create_all(bind=engine)
+
 # Initialize FastAPI app
 app = FastAPI(
     title="ReportHub API",
