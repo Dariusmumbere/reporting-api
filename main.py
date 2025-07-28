@@ -381,6 +381,7 @@ class ReportInDB(ReportBase):
     organization_name: str
     created_at: datetime
     updated_at: Optional[datetime]
+    template_data: Optional[dict] = None
     attachments: List[dict] = []
 
     class Config:
