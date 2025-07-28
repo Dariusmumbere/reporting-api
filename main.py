@@ -1408,11 +1408,12 @@ async def delete_user(
     return {"message": "User deleted successfully"}
 
 # Report routes
-@app.post("/reports", response_model=ReportInDB)
+@app.post("/reports")
 async def create_report(
     title: str = Form(...),
     description: str = Form(...),
     category: str = Form(...),
+    template_fields: Optional[str] = Form(None),
     attachments: List[UploadFile] = File([]),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
@@ -1424,13 +1425,25 @@ async def create_report(
             detail="User must belong to an organization to create reports"
         )
     
+    # Parse template fields if provided
+    template_data = None
+    if template_fields:
+        try:
+            template_data = json.loads(template_fields)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid template fields data"
+            )
+    
     # Create report
     db_report = Report(
         title=title,
         description=description,
         category=category,
         author_id=current_user.id,
-        organization_id=current_user.organization_id if current_user.role != "super_admin" else None
+        organization_id=current_user.organization_id if current_user.role != "super_admin" else None,
+        template_data=template_data  # Store the template fields data
     )
     
     db.add(db_report)
@@ -1475,9 +1488,9 @@ async def create_report(
     else:
         report_data["organization_name"] = "No Organization"
     report_data["attachments"] = saved_attachments
+    report_data["template_fields"] = template_data
     
     return ReportInDB(**report_data)
-
 @app.get("/reports", response_model=List[ReportInDB])
 async def read_reports(
     skip: int = 0,
@@ -1880,3 +1893,192 @@ async def download_file(file_name: str):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@app.post("/templates", response_model=ReportTemplateInDB)
+async def create_template(
+    template: ReportTemplateCreate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Check if template with this name already exists
+    existing_template = db.query(ReportTemplate).filter(
+        ReportTemplate.name == template.name,
+        ReportTemplate.organization_id == current_user.organization_id
+    ).first()
+    
+    if existing_template:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Template with this name already exists"
+        )
+    
+    # Create template
+    db_template = ReportTemplate(
+        name=template.name,
+        description=template.description,
+        category=template.category,
+        organization_id=current_user.organization_id,
+        created_by=current_user.id
+    )
+    
+    db.add(db_template)
+    db.commit()
+    db.refresh(db_template)
+    
+    # Create fields
+    for field in template.fields:
+        db_field = TemplateField(
+            template_id=db_template.id,
+            name=field.name,
+            label=field.label,
+            field_type=field.field_type,
+            required=field.required,
+            order=field.order,
+            options=field.options,
+            default_value=field.default_value,
+            placeholder=field.placeholder
+        )
+        db.add(db_field)
+    
+    db.commit()
+    db.refresh(db_template)
+    
+    return db_template
+
+@app.get("/templates", response_model=List[ReportTemplateInDB])
+async def get_templates(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # For super admin, get all templates
+    if current_user.role == "super_admin":
+        templates = db.query(ReportTemplate).offset(skip).limit(limit).all()
+    else:
+        # For others, get templates from their organization
+        templates = db.query(ReportTemplate).filter(
+            ReportTemplate.organization_id == current_user.organization_id
+        ).offset(skip).limit(limit).all()
+    
+    return templates
+
+@app.get("/templates/{template_id}", response_model=ReportTemplateInDB)
+async def get_template(
+    template_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # For super admin, can get any template
+    if current_user.role == "super_admin":
+        template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id
+        ).first()
+    else:
+        # For others, only templates from their organization
+        template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id,
+            ReportTemplate.organization_id == current_user.organization_id
+        ).first()
+    
+    if template is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    return template
+
+@app.put("/templates/{template_id}", response_model=ReportTemplateInDB)
+async def update_template(
+    template_id: int,
+    template: ReportTemplateCreate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # For super admin, can update any template
+    if current_user.role == "super_admin":
+        db_template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id
+        ).first()
+    else:
+        # For others, only templates from their organization
+        db_template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id,
+            ReportTemplate.organization_id == current_user.organization_id
+        ).first()
+    
+    if db_template is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    # Check if template with this name already exists (excluding current template)
+    existing_template = db.query(ReportTemplate).filter(
+        ReportTemplate.name == template.name,
+        ReportTemplate.organization_id == current_user.organization_id,
+        ReportTemplate.id != template_id
+    ).first()
+    
+    if existing_template:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Template with this name already exists"
+        )
+    
+    # Update template
+    db_template.name = template.name
+    db_template.description = template.description
+    db_template.category = template.category
+    db_template.updated_at = datetime.utcnow()
+    
+    # Delete existing fields
+    db.query(TemplateField).filter(
+        TemplateField.template_id == template_id
+    ).delete()
+    
+    # Create new fields
+    for field in template.fields:
+        db_field = TemplateField(
+            template_id=db_template.id,
+            name=field.name,
+            label=field.label,
+            field_type=field.field_type,
+            required=field.required,
+            order=field.order,
+            options=field.options,
+            default_value=field.default_value,
+            placeholder=field.placeholder
+        )
+        db.add(db_field)
+    
+    db.commit()
+    db.refresh(db_template)
+    
+    return db_template
+
+@app.delete("/templates/{template_id}")
+async def delete_template(
+    template_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # For super admin, can delete any template
+    if current_user.role == "super_admin":
+        template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id
+        ).first()
+    else:
+        # For others, only templates from their organization
+        template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id,
+            ReportTemplate.organization_id == current_user.organization_id
+        ).first()
+    
+    if template is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    # Delete fields first
+    db.query(TemplateField).filter(
+        TemplateField.template_id == template_id
+    ).delete()
+    
+    # Then delete the template
+    db.delete(template)
+    db.commit()
+    
+    return {"message": "Template deleted successfully"}
