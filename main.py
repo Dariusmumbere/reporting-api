@@ -174,6 +174,7 @@ class Organization(Base):
     name = Column(String, unique=True, nullable=False)
     logo_url = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    templates = relationship("ReportTemplate", back_populates="organization")
 
     users = relationship("User", back_populates="organization")
     reports = relationship("Report", back_populates="organization")
@@ -252,6 +253,38 @@ class EmailVerification(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True))
     is_verified = Column(Boolean, default=False)
+
+class ReportTemplate(Base):
+    __tablename__ = "report_templates"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(String)
+    category = Column(String)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    organization = relationship("Organization", back_populates="templates")
+    creator = relationship("User")
+    fields = relationship("TemplateField", back_populates="template")
+
+class TemplateField(Base):
+    __tablename__ = "template_fields"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    template_id = Column(Integer, ForeignKey("report_templates.id"))
+    name = Column(String, nullable=False)
+    label = Column(String, nullable=False)
+    field_type = Column(String, nullable=False)  # text, number, dropdown, checkbox, date, etc.
+    required = Column(Boolean, default=False)
+    order = Column(Integer, default=0)
+    options = Column(JSON, nullable=True)  # For dropdowns, checkboxes, etc.
+    default_value = Column(String, nullable=True)
+    placeholder = Column(String, nullable=True)
+    
+    template = relationship("ReportTemplate", back_populates="fields")
 
 # Initialize default admin user
 def init_default_admin():
@@ -424,6 +457,45 @@ class EmailVerificationRequest(BaseModel):
 class VerifyOTPRequest(BaseModel):
     email: EmailStr
     otp: str
+
+class TemplateFieldBase(BaseModel):
+    name: str
+    label: str
+    field_type: str
+    required: bool = False
+    order: int = 0
+    options: Optional[Dict] = None
+    default_value: Optional[str] = None
+    placeholder: Optional[str] = None
+
+class TemplateFieldCreate(TemplateFieldBase):
+    pass
+
+class TemplateFieldInDB(TemplateFieldBase):
+    id: int
+    template_id: int
+    
+    class Config:
+        from_attributes = True
+
+class ReportTemplateBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+
+class ReportTemplateCreate(ReportTemplateBase):
+    fields: List[TemplateFieldCreate] = []
+
+class ReportTemplateInDB(ReportTemplateBase):
+    id: int
+    organization_id: Optional[int]
+    created_by: int
+    created_at: datetime
+    updated_at: Optional[datetime]
+    fields: List[TemplateFieldInDB] = []
+    
+    class Config:
+        from_attributes = True
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
