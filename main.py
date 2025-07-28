@@ -211,6 +211,7 @@ class Report(Base):
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    template_data = Column(JSON, nullable=True)  # Add this line
 
     author = relationship("User", back_populates="reports")
     organization = relationship("Organization", back_populates="reports")
@@ -316,31 +317,31 @@ def init_default_admin():
     finally:
         db.close()
 
-def add_logo_url_column():
+def add_template_data_column():
     db = SessionLocal()
     try:
         # Check if the column already exists
         inspector = inspect(db.get_bind())
-        columns = inspector.get_columns('organizations')
+        columns = inspector.get_columns('reports')
         column_names = [column['name'] for column in columns]
         
-        if 'logo_url' not in column_names:
+        if 'template_data' not in column_names:
             # Add the column if it doesn't exist
-            db.execute(text("ALTER TABLE organizations ADD COLUMN logo_url VARCHAR"))
+            db.execute(text("ALTER TABLE reports ADD COLUMN template_data JSONB"))
             db.commit()
-            print("Successfully added logo_url column to organizations table")
+            print("Successfully added template_data column to reports table")
         else:
-            print("logo_url column already exists in organizations table")
+            print("template_data column already exists in reports table")
     except Exception as e:
         db.rollback()
-        print(f"Error adding logo_url column: {e}")
+        print(f"Error adding template_data column: {e}")
         raise e
     finally:
         db.close()
-
+        
 # Reset database and initialize data
 init_default_admin()
-add_logo_url_column()
+add_template_data_column()
 
 # Pydantic models (remain the same as before)
 class Token(BaseModel):
