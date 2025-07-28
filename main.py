@@ -316,32 +316,9 @@ def init_default_admin():
         raise e
     finally:
         db.close()
-
-def add_template_data_column():
-    db = SessionLocal()
-    try:
-        # Check if the column already exists
-        inspector = inspect(db.get_bind())
-        columns = inspector.get_columns('reports')
-        column_names = [column['name'] for column in columns]
-        
-        if 'template_data' not in column_names:
-            # Add the column if it doesn't exist
-            db.execute(text("ALTER TABLE reports ADD COLUMN template_data JSONB"))
-            db.commit()
-            print("Successfully added template_data column to reports table")
-        else:
-            print("template_data column already exists in reports table")
-    except Exception as e:
-        db.rollback()
-        print(f"Error adding template_data column: {e}")
-        raise e
-    finally:
-        db.close()
         
 # Reset database and initialize data
 init_default_admin()
-add_template_data_column()
 
 # Pydantic models (remain the same as before)
 class Token(BaseModel):
@@ -1598,6 +1575,8 @@ async def read_report(
             "url": a.url
         } for a in attachments
     ]
+    # Add template fields to response
+    report_data["template_fields"] = report.template_data
     
     return ReportInDB(**report_data)
 
