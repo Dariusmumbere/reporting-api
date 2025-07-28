@@ -1575,8 +1575,9 @@ async def read_report(
             "url": a.url
         } for a in attachments
     ]
-    # Add template fields to response
-    report_data["template_fields"] = report.template_data
+    
+    # Ensure template_data is included in the response
+    report_data["template_data"] = report.template_data
     
     return ReportInDB(**report_data)
 
