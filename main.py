@@ -1790,18 +1790,21 @@ async def update_organization(
 
 @app.get("/download/{file_name}")
 async def download_file(file_name: str):
-    """Generate a presigned URL for downloading a file"""
     try:
-        # Generate a presigned URL for the file
+        # Get the file from B2
         object_key = f"attachments/{file_name}"
-        url = b2_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': B2_BUCKET_NAME,
-                'Key': object_key
-            },
-            ExpiresIn=3600  # URL expires in 1 hour
+        response = b2_client.get_object(
+            Bucket=B2_BUCKET_NAME,
+            Key=object_key
         )
-        return {"url": url}
+        
+        # Stream the file back to the client
+        return StreamingResponse(
+            response['Body'],
+            media_type=response['ContentType'],
+            headers={
+                'Content-Disposition': f'attachment; filename="{file_name}"'
+            }
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
