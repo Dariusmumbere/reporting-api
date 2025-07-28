@@ -1787,3 +1787,21 @@ async def update_organization(
         db.refresh(org)
     
     return {"message": "Organization updated successfully"}
+
+@app.get("/download/{file_name}")
+async def download_file(file_name: str):
+    """Generate a presigned URL for downloading a file"""
+    try:
+        # Generate a presigned URL for the file
+        object_key = f"attachments/{file_name}"
+        url = b2_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': B2_BUCKET_NAME,
+                'Key': object_key
+            },
+            ExpiresIn=3600  # URL expires in 1 hour
+        )
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
