@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -475,6 +475,19 @@ class ReportTemplateInDB(ReportTemplateBase):
     
     class Config:
         from_attributes = True
+        
+class SyncRequest(BaseModel):
+    last_sync_time: float
+    created_reports: List[Dict[str, Any]] = []
+    updated_reports: List[Dict[str, Any]] = []
+    deleted_report_ids: List[int] = []
+
+class SyncResponse(BaseModel):
+    current_time: float
+    reports: List[Dict[str, Any]]
+    users: List[Dict[str, Any]]
+    templates: List[Dict[str, Any]]
+    conflicts: List[Dict[str, Any]] = []
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -2107,3 +2120,91 @@ async def delete_message(
         }), message.recipient_id)
     
     return {"message": "Message deleted successfully"}
+# Add this endpoint for synchronization
+@app.post("/sync", response_model=SyncResponse)
+async def sync_data(
+    request: Request,
+    sync_data: SyncRequest,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Get current server time
+    current_time = time.time()
+    
+    # Process client changes
+    conflicts = []
+    
+    # Handle created reports
+    for report_data in sync_data.created_reports:
+        try:
+            # Check if report already exists (possible conflict)
+            existing_report = db.query(Report).filter(Report.id == report_data.get('id')).first()
+            if existing_report:
+                conflicts.append({
+                    "type": "report_create",
+                    "local_data": report_data,
+                    "server_data": existing_report.__dict__
+                })
+                continue
+                
+            # Create new report
+            db_report = Report(**report_data)
+            db.add(db_report)
+        except Exception as e:
+            print(f"Error creating report from sync: {e}")
+    
+    # Handle updated reports
+    for report_data in sync_data.updated_reports:
+        try:
+            report = db.query(Report).filter(Report.id == report_data['id']).first()
+            if not report:
+                continue
+                
+            # Check for conflicts (if server version is newer)
+            if report.updated_at and report_data.get('updated_at') and \
+               report.updated_at > report_data['updated_at']:
+                conflicts.append({
+                    "type": "report_update",
+                    "local_data": report_data,
+                    "server_data": report.__dict__
+                })
+                continue
+                
+            # Update report
+            for key, value in report_data.items():
+                if hasattr(report, key) and key != 'id':
+                    setattr(report, key, value)
+        except Exception as e:
+            print(f"Error updating report from sync: {e}")
+    
+    # Handle deleted reports
+    for report_id in sync_data.deleted_report_ids:
+        try:
+            report = db.query(Report).filter(Report.id == report_id).first()
+            if report:
+                db.delete(report)
+        except Exception as e:
+            print(f"Error deleting report from sync: {e}")
+    
+    db.commit()
+    
+    # Get all data needed by client
+    reports = db.query(Report).filter(
+        Report.organization_id == current_user.organization_id
+    ).all()
+    
+    users = db.query(User).filter(
+        User.organization_id == current_user.organization_id
+    ).all()
+    
+    templates = db.query(ReportTemplate).filter(
+        ReportTemplate.organization_id == current_user.organization_id
+    ).all()
+    
+    return SyncResponse(
+        current_time=current_time,
+        reports=[r.__dict__ for r in reports],
+        users=[u.__dict__ for u in users],
+        templates=[t.__dict__ for t in templates],
+        conflicts=conflicts
+    )
