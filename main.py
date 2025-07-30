@@ -5,10 +5,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr, validator
 from typing import List, Optional, Dict
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from collections import defaultdict
 import os
 import uuid
 import json
@@ -2108,155 +2107,192 @@ async def delete_message(
         }), message.recipient_id)
     
     return {"message": "Message deleted successfully"}
-@app.get("/analytics")
-async def get_analytics(
-    period: str = "day",  # day, week, or month
+
+@app.get("/dashboard")
+async def get_dashboard_data(
+    period: str = "weekly",  # daily, weekly, monthly
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     # Calculate date ranges based on period
-    today = date.today()
-    start_date = today
-    
-    if period == "week":
-        start_date = today - timedelta(days=today.weekday())  # Start of current week
-    elif period == "month":
-        start_date = today.replace(day=1)  # Start of current month
-    
-    # For super admin, get all reports, otherwise filter by organization
-    if current_user.role == "super_admin":
-        reports_query = db.query(Report)
+    end_date = datetime.utcnow()
+    if period == "daily":
+        start_date = end_date - timedelta(days=1)
+        interval = "hour"
+    elif period == "weekly":
+        start_date = end_date - timedelta(days=7)
+        interval = "day"
+    else:  # monthly
+        start_date = end_date - timedelta(days=30)
+        interval = "day"
+
+    # Get counts for each status
+    counts_query = db.query(
+        func.count(Report.id).label("total"),
+        func.count(case((Report.status == "pending", 1))).label("pending"),
+        func.count(case((Report.status == "approved", 1))).label("approved"),
+        func.count(case((Report.status == "rejected", 1))).label("rejected")
+    )
+
+    # Apply organization filter if not super admin
+    if current_user.role != "super_admin" and current_user.organization_id:
+        counts_query = counts_query.filter(Report.organization_id == current_user.organization_id)
+
+    counts = counts_query.first()
+
+    # Get trend data
+    trend_data = []
+    if interval == "hour":
+        # Group by hour for daily view
+        for i in range(24):
+            hour_start = start_date + timedelta(hours=i)
+            hour_end = hour_start + timedelta(hours=1)
+            
+            hour_counts = db.query(
+                func.count(Report.id).label("total"),
+                func.count(case((Report.status == "pending", 1))).label("pending"),
+                func.count(case((Report.status == "approved", 1))).label("approved"),
+                func.count(case((Report.status == "rejected", 1))).label("rejected")
+            ).filter(
+                Report.created_at >= hour_start,
+                Report.created_at < hour_end
+            )
+            
+            if current_user.role != "super_admin" and current_user.organization_id:
+                hour_counts = hour_counts.filter(Report.organization_id == current_user.organization_id)
+            
+            counts = hour_counts.first()
+            trend_data.append({
+                "label": hour_start.strftime("%H:00"),
+                "total": counts.total or 0,
+                "pending": counts.pending or 0,
+                "approved": counts.approved or 0,
+                "rejected": counts.rejected or 0
+            })
     else:
-        reports_query = db.query(Report).filter(
-            Report.organization_id == current_user.organization_id
-        )
-    
-    # Status distribution (pie chart)
-    status_counts = reports_query.with_entities(
-        Report.status,
-        func.count(Report.id)
-    ).group_by(Report.status).all()
-    
-    status_distribution = {
-        "approved": 0,
-        "pending": 0,
-        "rejected": 0
+        # Group by day for weekly/monthly view
+        current_date = start_date
+        while current_date <= end_date:
+            next_date = current_date + timedelta(days=1)
+            
+            day_counts = db.query(
+                func.count(Report.id).label("total"),
+                func.count(case((Report.status == "pending", 1))).label("pending"),
+                func.count(case((Report.status == "approved", 1))).label("approved"),
+                func.count(case((Report.status == "rejected", 1))).label("rejected")
+            ).filter(
+                Report.created_at >= current_date,
+                Report.created_at < next_date
+            )
+            
+            if current_user.role != "super_admin" and current_user.organization_id:
+                day_counts = day_counts.filter(Report.organization_id == current_user.organization_id)
+            
+            counts = day_counts.first()
+            trend_data.append({
+                "label": current_date.strftime("%b %d"),
+                "total": counts.total or 0,
+                "pending": counts.pending or 0,
+                "approved": counts.approved or 0,
+                "rejected": counts.rejected or 0
+            })
+            
+            current_date = next_date
+
+    # Extract trend labels and values
+    trend_labels = [item["label"] for item in trend_data]
+    trend_total = [item["total"] for item in trend_data]
+    trend_pending = [item["pending"] for item in trend_data]
+    trend_approved = [item["approved"] for item in trend_data]
+    trend_rejected = [item["rejected"] for item in trend_data]
+
+    # Calculate trends (percentage change from previous period)
+    def calculate_trend(current, previous):
+        if previous == 0:
+            return {"value": current, "percentage": 0}
+        percentage = ((current - previous) / previous) * 100
+        return {"value": current, "percentage": round(percentage, 1)}
+
+    # Get previous period data for trends
+    prev_start_date = start_date - (end_date - start_date)
+    prev_counts_query = db.query(
+        func.count(Report.id).label("total"),
+        func.count(case((Report.status == "pending", 1))).label("pending"),
+        func.count(case((Report.status == "approved", 1))).label("approved"),
+        func.count(case((Report.status == "rejected", 1))).label("rejected")
+    ).filter(
+        Report.created_at >= prev_start_date,
+        Report.created_at < start_date
+    )
+
+    if current_user.role != "super_admin" and current_user.organization_id:
+        prev_counts_query = prev_counts_query.filter(Report.organization_id == current_user.organization_id)
+
+    prev_counts = prev_counts_query.first()
+
+    trends = {
+        "total": calculate_trend(counts.total or 0, prev_counts.total or 0),
+        "pending": calculate_trend(counts.pending or 0, prev_counts.pending or 0),
+        "approved": calculate_trend(counts.approved or 0, prev_counts.approved or 0),
+        "rejected": calculate_trend(counts.rejected or 0, prev_counts.rejected or 0)
     }
-    
-    for status, count in status_counts:
-        status_lower = status.lower()
-        if status_lower in status_distribution:
-            status_distribution[status_lower] = count
-    
-    # Reports over time (line chart)
-    time_series = []
-    date_format = "%Y-%m-%d"
-    
-    if period == "day":
-        # Last 7 days
-        for i in range(6, -1, -1):
-            day = today - timedelta(days=i)
-            time_series.append(day.strftime(date_format))
-    elif period == "week":
-        # Last 8 weeks
-        for i in range(8, 0, -1):
-            week_start = today - timedelta(weeks=i)
-            time_series.append(f"Week {week_start.isocalendar()[1]}")
-    else:  # month
-        # Last 6 months
-        for i in range(5, -1, -1):
-            month = today.replace(month=today.month - i)
-            time_series.append(month.strftime("%b %Y"))
-    
-    reports_over_time = []
-    
-    if period == "day":
-        # Daily data for last 7 days
-        for i in range(6, -1, -1):
-            day = today - timedelta(days=i)
-            day_str = day.strftime(date_format)
-            
-            day_counts = reports_query.filter(
-                func.date(Report.created_at) == day
-            ).with_entities(
-                Report.status,
-                func.count(Report.id)
-            ).group_by(Report.status).all()
-            
-            counts = {"approved": 0, "pending": 0, "rejected": 0, "date": day_str}
-            
-            for status, count in day_counts:
-                status_lower = status.lower()
-                if status_lower in counts:
-                    counts[status_lower] = count
-            
-            reports_over_time.append(counts)
-    elif period == "week":
-        # Weekly data for last 8 weeks
-        for i in range(8, 0, -1):
-            week_start = today - timedelta(weeks=i)
-            week_end = week_start + timedelta(days=6)
-            
-            week_counts = reports_query.filter(
-                func.date(Report.created_at) >= week_start,
-                func.date(Report.created_at) <= week_end
-            ).with_entities(
-                Report.status,
-                func.count(Report.id)
-            ).group_by(Report.status).all()
-            
-            counts = {
-                "approved": 0, 
-                "pending": 0, 
-                "rejected": 0, 
-                "date": f"Week {week_start.isocalendar()[1]}"
-            }
-            
-            for status, count in week_counts:
-                status_lower = status.lower()
-                if status_lower in counts:
-                    counts[status_lower] = count
-            
-            reports_over_time.append(counts)
-    else:  # month
-        # Monthly data for last 6 months
-        for i in range(5, -1, -1):
-            month_start = today.replace(month=today.month - i, day=1)
-            next_month = month_start.replace(day=28) + timedelta(days=4)
-            month_end = next_month - timedelta(days=next_month.day)
-            
-            month_counts = reports_query.filter(
-                func.date(Report.created_at) >= month_start,
-                func.date(Report.created_at) <= month_end
-            ).with_entities(
-                Report.status,
-                func.count(Report.id)
-            ).group_by(Report.status).all()
-            
-            counts = {
-                "approved": 0, 
-                "pending": 0, 
-                "rejected": 0, 
-                "date": month_start.strftime("%b %Y")
-            }
-            
-            for status, count in month_counts:
-                status_lower = status.lower()
-                if status_lower in counts:
-                    counts[status_lower] = count
-            
-            reports_over_time.append(counts)
-    
-    # Category distribution (bar chart)
-    category_counts = reports_query.with_entities(
+
+    # Get reports by category
+    category_query = db.query(
         Report.category,
-        func.count(Report.id)
-    ).group_by(Report.category).all()
-    
-    category_distribution = {category: count for category, count in category_counts}
-    
+        func.count(Report.id).label("count")
+    ).group_by(Report.category)
+
+    if current_user.role != "super_admin" and current_user.organization_id:
+        category_query = category_query.filter(Report.organization_id == current_user.organization_id)
+
+    categories = category_query.all()
+    categories_data = [{"name": c[0], "count": c[1]} for c in categories]
+
+    # Get recent activity (last 5 reports and user actions)
+    recent_reports_query = db.query(Report).order_by(Report.created_at.desc()).limit(5)
+    if current_user.role != "super_admin" and current_user.organization_id:
+        recent_reports_query = recent_reports_query.filter(Report.organization_id == current_user.organization_id)
+
+    recent_reports = recent_reports_query.all()
+
+    recent_activity = []
+    for report in recent_reports:
+        recent_activity.append({
+            "type": "report",
+            "status": report.status,
+            "message": f"New report '{report.title}' submitted by {report.author.name}",
+            "timestamp": report.created_at,
+            "link": f"/reports/{report.id}"
+        })
+
+    # Get recent reports for the table
+    recent_reports_data = []
+    for report in recent_reports:
+        recent_reports_data.append({
+            "id": report.id,
+            "title": report.title,
+            "status": report.status,
+            "created_at": report.created_at,
+            "author_name": report.author.name
+        })
+
     return {
-        "status_distribution": status_distribution,
-        "reports_over_time": reports_over_time,
-        "category_distribution": category_distribution
+        "counts": {
+            "total": counts.total or 0,
+            "pending": counts.pending or 0,
+            "approved": counts.approved or 0,
+            "rejected": counts.rejected or 0
+        },
+        "trends": trends,
+        "categories": categories_data,
+        "trend": {
+            "labels": trend_labels,
+            "total": trend_total,
+            "pending": trend_pending,
+            "approved": trend_approved,
+            "rejected": trend_rejected
+        },
+        "recentActivity": recent_activity,
+        "recentReports": recent_reports_data
     }
