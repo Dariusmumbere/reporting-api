@@ -2285,11 +2285,14 @@ async def get_dashboard_data(
             
             current_date = next_date
 
-    # Get categories in the exact format needed by the frontend chart
-    categories = base_query.with_entities(
-        Report.category.label("name"),
-        func.count(Report.id).label("count")
-    ).group_by(Report.category).all()
+    # Get categories data - properly formatted for JSON serialization
+    categories_query = base_query.with_entities(
+        Report.category,
+        func.count(Report.id)
+    ).group_by(Report.category)
+    
+    categories_results = categories_query.all()
+    categories_data = [{"name": cat[0], "count": cat[1]} for cat in categories_results]
 
     # Calculate trends (percentage change from previous period)
     def calculate_trend(current, previous):
@@ -2349,7 +2352,7 @@ async def get_dashboard_data(
             "rejected": counts.rejected or 0
         },
         "trends": trends,
-        "categories": categories,  # Now in the correct format for the frontend chart
+        "categories": categories_data,  # Now properly serializable
         "trend": {
             "labels": [item["label"] for item in trend_data],
             "total": [item["total"] for item in trend_data],
