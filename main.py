@@ -490,6 +490,22 @@ class ReportTemplateInDB(ReportTemplateBase):
     class Config:
         from_attributes = True
 
+class InvitationResponse(BaseModel):
+    id: int
+    token: str
+    created_at: datetime
+    expires_at: datetime
+    is_used: bool
+    created_by: UserBasicInfo
+    
+    class Config:
+        orm_mode = True
+
+class UserBasicInfo(BaseModel):
+    id: int
+    name: str
+    email: str
+    
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2423,3 +2439,37 @@ async def accept_invitation(
         "access_token": access_token,
         "token_type": "bearer"
     }
+    
+@app.get("/invitations", response_model=List[InvitationResponse])
+async def get_invitations(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
+):
+    # Get all active invitations for the current user's organization
+    invitations = db.query(InvitationLink).filter(
+        InvitationLink.organization_id == current_user.organization_id
+    ).order_by(InvitationLink.created_at.desc()).all()
+    
+    return invitations
+
+@app.delete("/invitations/{invite_id}")
+async def revoke_invitation(
+    invite_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
+):
+    invitation = db.query(InvitationLink).filter(
+        InvitationLink.id == invite_id,
+        InvitationLink.organization_id == current_user.organization_id
+    ).first()
+    
+    if not invitation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invitation not found"
+        )
+    
+    db.delete(invitation)
+    db.commit()
+    
+    return {"message": "Invitation revoked successfully"}
