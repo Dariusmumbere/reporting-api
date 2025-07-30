@@ -2285,13 +2285,11 @@ async def get_dashboard_data(
             
             current_date = next_date
 
-    # Get categories data in the format the chart expects (name vs total)
+    # Get categories in the exact format needed by the frontend chart
     categories = base_query.with_entities(
-        Report.category,
-        func.count(Report.id).label("total")
+        Report.category.label("name"),
+        func.count(Report.id).label("count")
     ).group_by(Report.category).all()
-
-    categories_data = [{"name": c[0], "total": c[1]} for c in categories]
 
     # Calculate trends (percentage change from previous period)
     def calculate_trend(current, previous):
@@ -2351,7 +2349,7 @@ async def get_dashboard_data(
             "rejected": counts.rejected or 0
         },
         "trends": trends,
-        "categories": categories_data,  # Now in simplified format for the chart
+        "categories": categories,  # Now in the correct format for the frontend chart
         "trend": {
             "labels": [item["label"] for item in trend_data],
             "total": [item["total"] for item in trend_data],
@@ -2360,27 +2358,9 @@ async def get_dashboard_data(
             "rejected": [item["rejected"] for item in trend_data]
         },
         "recentActivity": recent_activity,
-        "recentReports": recent_reports_data,
-        # Include the detailed categories data in a separate field if needed elsewhere
-        "categoriesDetailed": [
-            {
-                "name": c[0],
-                "total": c[1],
-                "pending": base_query.filter(
-                    Report.category == c[0],
-                    Report.status == "pending"
-                ).count(),
-                "approved": base_query.filter(
-                    Report.category == c[0],
-                    Report.status == "approved"
-                ).count(),
-                "rejected": base_query.filter(
-                    Report.category == c[0],
-                    Report.status == "rejected"
-                ).count()
-            } for c in categories
-        ]
+        "recentReports": recent_reports_data
     }
+    
 @app.post("/invitations/generate", response_model=dict)
 async def generate_invitation_link(
     db: Session = Depends(get_db),
