@@ -817,6 +817,8 @@ async def signup_user(
     name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
+    organization_name: Optional[str] = Form(None),
+    invite_token: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     # Check if email already exists
@@ -839,7 +841,20 @@ async def signup_user(
             detail="Email not verified"
         )
     
-    # Create user without organization (will be set later)
+    # Validate that either organization_name or invite_token is provided, but not both
+    if not organization_name and not invite_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either organization name or invitation token is required"
+        )
+    
+    if organization_name and invite_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot provide both organization name and invitation token"
+        )
+    
+    # Create user
     hashed_password = get_password_hash(password)
     
     # First user becomes admin, others are staff
@@ -851,12 +866,55 @@ async def signup_user(
         name=name,
         hashed_password=hashed_password,
         role=role,
-        organization_id=None  # Organization will be set after registration
+        organization_id=None  # Will be set based on flow
     )
+    
+    # Handle invitation flow
+    if invite_token:
+        invitation = db.query(InvitationLink).filter(
+            InvitationLink.token == invite_token,
+            InvitationLink.expires_at >= datetime.utcnow(),
+            InvitationLink.is_used == False
+        ).first()
+        
+        if not invitation:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired invitation link"
+            )
+        
+        # Set user's organization from invitation
+        db_user.organization_id = invitation.organization_id
+        db_user.role = "staff"  # Invited users are always staff
+        
+        # Mark invitation as used
+        invitation.is_used = True
     
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+    
+    # Handle organization creation flow
+    if organization_name:
+        # Check if organization name already exists
+        existing_org = db.query(Organization).filter(Organization.name == organization_name).first()
+        if existing_org:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization name already exists"
+            )
+        
+        # Create new organization
+        db_org = Organization(name=organization_name)
+        db.add(db_org)
+        db.commit()
+        db.refresh(db_org)
+        
+        # Update user's organization
+        db_user.organization_id = db_org.id
+        db_user.role = "admin"  # Organization creator becomes admin
+        db.commit()
+        db.refresh(db_user)
     
     # Create access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -864,11 +922,10 @@ async def signup_user(
         data={"sub": db_user.email}, expires_delta=access_token_expires
     )
     
-    # All new signups require organization registration
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "requires_org_registration": True
+        "requires_org_registration": False  # Already handled in this flow
     }
 
 @app.post("/auth/register-organization")
@@ -2475,407 +2532,3 @@ async def revoke_invitation(
     
     return {"message": "Invitation revoked successfully"}
 
-# Add this route to handle the invitation link
-@app.get("/invite/{token}", response_class=HTMLResponse)
-async def invitation_signup_page(token: str, db: Session = Depends(get_db)):
-    # Validate the token
-    invitation = db.query(InvitationLink).filter(
-        InvitationLink.token == token,
-        InvitationLink.expires_at >= datetime.utcnow(),
-        InvitationLink.is_used == False
-    ).first()
-    
-    if not invitation:
-        return HTMLResponse(
-            content="""
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Invalid Invitation</title>
-                <style>
-                    body {
-                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                        background-color: #f5f7fa;
-                        margin: 0;
-                        padding: 0;
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        height: 100vh;
-                        color: #333;
-                    }
-                    .container {
-                        background-color: white;
-                        border-radius: 10px;
-                        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
-                        padding: 2rem;
-                        max-width: 500px;
-                        width: 90%;
-                        text-align: center;
-                    }
-                    h1 {
-                        color: #e74c3c;
-                        margin-bottom: 1rem;
-                    }
-                    p {
-                        margin-bottom: 2rem;
-                        line-height: 1.6;
-                    }
-                    .logo {
-                        margin-bottom: 1.5rem;
-                        font-size: 2rem;
-                        font-weight: bold;
-                        color: #3498db;
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="logo">ReportHub</div>
-                    <h1>Invitation Expired or Invalid</h1>
-                    <p>This invitation link is no longer valid. It may have expired or already been used.</p>
-                    <p>Please contact your administrator for a new invitation.</p>
-                </div>
-            </body>
-            </html>
-            """,
-            status_code=400
-        )
-    
-    # Return the signup page
-    return HTMLResponse(
-        content=f"""
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Join {invitation.organization.name} on ReportHub</title>
-            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-            <style>
-                :root {{
-                    --primary: #4361ee;
-                    --primary-light: #eef2ff;
-                    --success: #10b981;
-                    --danger: #ef4444;
-                    --warning: #f59e0b;
-                    --dark: #1f2937;
-                    --light: #f3f4f6;
-                    --gray: #6b7280;
-                    --white: #ffffff;
-                }}
-                
-                * {{
-                    margin: 0;
-                    padding: 0;
-                    box-sizing: border-box;
-                }}
-                
-                body {{
-                    font-family: 'Inter', sans-serif;
-                    background-color: var(--light);
-                    color: var(--dark);
-                    line-height: 1.6;
-                }}
-                
-                .container {{
-                    display: flex;
-                    min-height: 100vh;
-                }}
-                
-                .left-panel {{
-                    flex: 1;
-                    background: linear-gradient(135deg, var(--primary), #3a0ca3);
-                    color: var(--white);
-                    padding: 3rem;
-                    display: flex;
-                    flex-direction: column;
-                    justify-content: center;
-                    align-items: center;
-                    text-align: center;
-                }}
-                
-                .left-panel h1 {{
-                    font-size: 2.5rem;
-                    margin-bottom: 1rem;
-                    font-weight: 700;
-                }}
-                
-                .left-panel p {{
-                    font-size: 1.1rem;
-                    opacity: 0.9;
-                    max-width: 500px;
-                    margin-bottom: 2rem;
-                }}
-                
-                .logo {{
-                    font-size: 2rem;
-                    font-weight: 700;
-                    margin-bottom: 2rem;
-                    display: flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                }}
-                
-                .right-panel {{
-                    flex: 1;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    padding: 2rem;
-                }}
-                
-                .card {{
-                    background-color: var(--white);
-                    border-radius: 12px;
-                    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);
-                    padding: 2.5rem;
-                    width: 100%;
-                    max-width: 450px;
-                }}
-                
-                .card h2 {{
-                    font-size: 1.75rem;
-                    margin-bottom: 1.5rem;
-                    color: var(--dark);
-                    font-weight: 600;
-                }}
-                
-                .org-badge {{
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                    background-color: var(--primary-light);
-                    color: var(--primary);
-                    padding: 0.5rem 1rem;
-                    border-radius: 50px;
-                    font-size: 0.9rem;
-                    font-weight: 500;
-                    margin-bottom: 1.5rem;
-                }}
-                
-                .form-group {{
-                    margin-bottom: 1.5rem;
-                }}
-                
-                label {{
-                    display: block;
-                    margin-bottom: 0.5rem;
-                    font-weight: 500;
-                    font-size: 0.95rem;
-                }}
-                
-                input {{
-                    width: 100%;
-                    padding: 0.75rem 1rem;
-                    border: 1px solid #e5e7eb;
-                    border-radius: 8px;
-                    font-size: 1rem;
-                    transition: all 0.2s;
-                }}
-                
-                input:focus {{
-                    outline: none;
-                    border-color: var(--primary);
-                    box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.2);
-                }}
-                
-                button {{
-                    width: 100%;
-                    padding: 0.75rem;
-                    background-color: var(--primary);
-                    color: white;
-                    border: none;
-                    border-radius: 8px;
-                    font-size: 1rem;
-                    font-weight: 500;
-                    cursor: pointer;
-                    transition: all 0.2s;
-                }}
-                
-                button:hover {{
-                    background-color: #3a56e8;
-                }}
-                
-                .error {{
-                    color: var(--danger);
-                    font-size: 0.85rem;
-                    margin-top: 0.25rem;
-                    display: none;
-                }}
-                
-                .footer {{
-                    margin-top: 1.5rem;
-                    text-align: center;
-                    font-size: 0.9rem;
-                    color: var(--gray);
-                }}
-                
-                .footer a {{
-                    color: var(--primary);
-                    text-decoration: none;
-                    font-weight: 500;
-                }}
-                
-                @media (max-width: 768px) {{
-                    .container {{
-                        flex-direction: column;
-                    }}
-                    
-                    .left-panel {{
-                        padding: 2rem 1.5rem;
-                    }}
-                    
-                    .right-panel {{
-                        padding: 1.5rem;
-                    }}
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="left-panel">
-                    <div class="logo">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                            <polyline points="14 2 14 8 20 8"></polyline>
-                            <line x1="16" y1="13" x2="8" y2="13"></line>
-                            <line x1="16" y1="17" x2="8" y2="17"></line>
-                            <polyline points="10 9 9 9 8 9"></polyline>
-                        </svg>
-                        <span>ReportHub</span>
-                    </div>
-                    <h1>Join {invitation.organization.name}</h1>
-                    <p>Create your account to start collaborating with your team on ReportHub's professional reporting platform.</p>
-                </div>
-                
-                <div class="right-panel">
-                    <div class="card">
-                        <div class="org-badge">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                                <circle cx="9" cy="7" r="4"></circle>
-                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-                                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-                            </svg>
-                            <span>{invitation.organization.name}</span>
-                        </div>
-                        
-                        <h2>Create your account</h2>
-                        
-                        <form id="signupForm" onsubmit="submitForm(event)">
-                            <input type="hidden" id="inviteToken" value="{token}">
-                            
-                            <div class="form-group">
-                                <label for="name">Full Name</label>
-                                <input type="text" id="name" name="name" required placeholder="John Doe">
-                                <div class="error" id="nameError"></div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="email">Email Address</label>
-                                <input type="email" id="email" name="email" required placeholder="you@example.com">
-                                <div class="error" id="emailError"></div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="password">Password</label>
-                                <input type="password" id="password" name="password" required placeholder="••••••••">
-                                <div class="error" id="passwordError"></div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="confirmPassword">Confirm Password</label>
-                                <input type="password" id="confirmPassword" name="confirmPassword" required placeholder="••••••••">
-                                <div class="error" id="confirmPasswordError"></div>
-                            </div>
-                            
-                            <button type="submit">Create Account</button>
-                        </form>
-                        
-                        <div class="footer">
-                            Already have an account? <a href="/login">Sign in</a>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <script>
-                function submitForm(event) {{
-                    event.preventDefault();
-                    
-                    // Reset errors
-                    document.querySelectorAll('.error').forEach(el => el.style.display = 'none');
-                    
-                    const formData = {{
-                        name: document.getElementById('name').value,
-                        email: document.getElementById('email').value,
-                        password: document.getElementById('password').value,
-                        confirmPassword: document.getElementById('confirmPassword').value,
-                        token: document.getElementById('inviteToken').value
-                    }};
-                    
-                    // Basic client-side validation
-                    if (formData.password !== formData.confirmPassword) {{
-                        const errorEl = document.getElementById('confirmPasswordError');
-                        errorEl.textContent = 'Passwords do not match';
-                        errorEl.style.display = 'block';
-                        return;
-                    }}
-                    
-                    if (formData.password.length < 8) {{
-                        const errorEl = document.getElementById('passwordError');
-                        errorEl.textContent = 'Password must be at least 8 characters';
-                        errorEl.style.display = 'block';
-                        return;
-                    }}
-                    
-                    // Submit to API
-                    fetch('/invitations/accept', {{
-                        method: 'POST',
-                        headers: {{
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                        }},
-                        body: new URLSearchParams(formData)
-                    }})
-                    .then(response => {{
-                        if (!response.ok) {{
-                            return response.json().then(err => {{
-                                throw err;
-                            }});
-                        }}
-                        return response.json();
-                    }})
-                    .then(data => {{
-                        // Success - store token and redirect
-                        localStorage.setItem('access_token', data.access_token);
-                        window.location.href = '/dashboard';
-                    }})
-                    .catch(error => {{
-                        console.error('Error:', error);
-                        if (error.detail) {{
-                            if (typeof error.detail === 'string') {{
-                                // General error
-                                alert(error.detail);
-                            }} else {{
-                                // Field-specific errors
-                                for (const [field, message] of Object.entries(error.detail)) {{
-                                    const errorEl = document.getElementById(field + 'Error');
-                                    if (errorEl) {{
-                                        errorEl.textContent = message;
-                                        errorEl.style.display = 'block';
-                                    }}
-                                }}
-                            }}
-                        }} else {{
-                            alert('An error occurred. Please try again.');
-                        }}
-                    }});
-                }}
-            </script>
-        </body>
-        </html>
-        """
-    )
