@@ -346,7 +346,14 @@ class TokenData(BaseModel):
 class UserBase(BaseModel):
     email: EmailStr
     name: str
+    
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
 
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+    
 class UserCreate(UserBase):
     password: str
     role: str = "staff"
@@ -2532,3 +2539,100 @@ async def revoke_invitation(
     
     return {"message": "Invitation revoked successfully"}
 
+@app.post("/auth/forgot-password")
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Send a password reset email to the user"""
+    user = get_user(db, request.email)
+    if not user:
+        # Don't reveal whether the email exists or not
+        return {"message": "If the email exists, a password reset link has been sent"}
+    
+    # Generate a reset token (using JWT for simplicity)
+    reset_token = create_access_token(
+        data={"sub": user.email, "purpose": "password_reset"},
+        expires_delta=timedelta(minutes=30)
+    )
+    
+    # Send email in background
+    background_tasks.add_task(send_password_reset_email, user.email, reset_token)
+    
+    return {"message": "If the email exists, a password reset link has been sent"}
+
+@app.post("/auth/reset-password")
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    """Reset the user's password using the provided token"""
+    try:
+        payload = jwt.decode(request.token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        purpose: str = payload.get("purpose")
+        
+        if email is None or purpose != "password_reset":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid token"
+            )
+            
+        user = get_user(db, email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid token"
+            )
+            
+        # Update password
+        user.hashed_password = get_password_hash(request.new_password)
+        db.commit()
+        
+        return {"message": "Password updated successfully"}
+        
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired token"
+        )
+
+# Add this utility function
+async def send_password_reset_email(email: str, reset_token: str):
+    """Send a password reset email with the token"""
+    try:
+        reset_link = f"https://dariusmumbere.github.io/reset-password?token={reset_token}"
+        
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_FROM
+        msg['To'] = email
+        msg['Subject'] = "Password Reset Request"
+        
+        body = f"""
+        <html>
+            <body>
+                <h2>Password Reset Request</h2>
+                <p>We received a request to reset your password for ReportHub.</p>
+                <p>Please click the link below to reset your password:</p>
+                <p><a href="{reset_link}">Reset Password</a></p>
+                <p>This link will expire in 30 minutes.</p>
+                <p>If you didn't request this, please ignore this email.</p>
+                <br>
+                <p>Best regards,</p>
+                <p>The ReportHub Team</p>
+            </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+        
+        return True
+    except Exception as e:
+        print(f"Error sending password reset email: {e}")
+        return False
