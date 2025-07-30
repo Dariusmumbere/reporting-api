@@ -287,6 +287,20 @@ class TemplateField(Base):
     
     template = relationship("ReportTemplate", back_populates="fields")
 
+class InvitationLink(Base):
+    __tablename__ = "invitation_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, unique=True, index=True, nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    is_used = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    organization = relationship("Organization")
+    
 # Initialize default admin user
 def init_default_admin():
     db = SessionLocal()
@@ -2299,4 +2313,113 @@ async def get_dashboard_data(
         },
         "recentActivity": recent_activity,
         "recentReports": recent_reports_data
+    }
+@app.post("/invitations/generate", response_model=dict)
+async def generate_invitation_link(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(is_org_admin_or_super_admin)
+):
+    # Generate a unique token
+    token = str(uuid.uuid4())
+    
+    # Set expiration (7 days from now)
+    expires_at = datetime.utcnow() + timedelta(days=7)
+    
+    # Create invitation link
+    invitation = InvitationLink(
+        token=token,
+        created_by_id=current_user.id,
+        organization_id=current_user.organization_id,
+        expires_at=expires_at
+    )
+    
+    db.add(invitation)
+    db.commit()
+    db.refresh(invitation)
+    
+    # Generate the full invitation URL
+    invite_url = f"https://reporthub.com/signup?invite={token}"
+    
+    return {"invite_url": invite_url}
+
+@app.get("/invitations/validate/{token}", response_model=dict)
+async def validate_invitation_token(
+    token: str,
+    db: Session = Depends(get_db)
+):
+    # Find the invitation
+    invitation = db.query(InvitationLink).filter(
+        InvitationLink.token == token,
+        InvitationLink.expires_at >= datetime.utcnow(),
+        InvitationLink.is_used == False
+    ).first()
+    
+    if not invitation:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired invitation link"
+        )
+    
+    return {
+        "valid": True,
+        "organization_id": invitation.organization_id,
+        "organization_name": invitation.organization.name
+    }
+
+@app.post("/invitations/accept", response_model=Token)
+async def accept_invitation(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    token: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    # First validate the token
+    invitation = db.query(InvitationLink).filter(
+        InvitationLink.token == token,
+        InvitationLink.expires_at >= datetime.utcnow(),
+        InvitationLink.is_used == False
+    ).first()
+    
+    if not invitation:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired invitation link"
+        )
+    
+    # Check if email already exists
+    existing_user = get_user(db, email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create user with the organization from the invitation
+    hashed_password = get_password_hash(password)
+    
+    db_user = User(
+        email=email,
+        name=name,
+        hashed_password=hashed_password,
+        role="staff",  # Default role for invited users
+        organization_id=invitation.organization_id
+    )
+    
+    db.add(db_user)
+    
+    # Mark invitation as used
+    invitation.is_used = True
+    db.commit()
+    db.refresh(db_user)
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": db_user.email}, expires_delta=access_token_expires
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer"
     }
