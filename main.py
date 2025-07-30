@@ -828,103 +828,105 @@ async def signup_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-
-    # ✅ Step 1: Check if email is verified
+    
+    # Check if email is verified
     verification = db.query(EmailVerification).filter(
-        EmailVerification.email == email
+        EmailVerification.email == email,
+        EmailVerification.is_verified == True
     ).first()
-
+    
     if not verification:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email verification record not found"
+            detail="Email not verified"
         )
-
-    if not verification.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email not verified. Please verify OTP first."
-        )
-
-    # ✅ Step 2: Only validate organization/invite AFTER OTP verification
+    
+    # Validate that either organization_name or invite_token is provided, but not both
     if not organization_name and not invite_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Either organization name or invitation token is required"
         )
-
+    
     if organization_name and invite_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot provide both organization name and invitation token"
         )
-
-    # ✅ Step 3: Create user
+    
+    # Create user
     hashed_password = get_password_hash(password)
+    
+    # First user becomes admin, others are staff
     is_first_user = db.query(User).count() == 0
     role = "admin" if is_first_user else "staff"
-
+    
     db_user = User(
         email=email,
         name=name,
         hashed_password=hashed_password,
         role=role,
-        organization_id=None  # Will be set later
+        organization_id=None  # Will be set based on flow
     )
-
-    # ✅ Step 4: Handle invitation flow
+    
+    # Handle invitation flow
     if invite_token:
         invitation = db.query(InvitationLink).filter(
             InvitationLink.token == invite_token,
             InvitationLink.expires_at >= datetime.utcnow(),
             InvitationLink.is_used == False
         ).first()
-
+        
         if not invitation:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or expired invitation link"
             )
-
+        
+        # Set user's organization from invitation
         db_user.organization_id = invitation.organization_id
-        db_user.role = "staff"
+        db_user.role = "staff"  # Invited users are always staff
+        
+        # Mark invitation as used
         invitation.is_used = True
-
+    
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-
-    # ✅ Step 5: Handle organization creation
+    
+    # Handle organization creation flow
     if organization_name:
+        # Check if organization name already exists
         existing_org = db.query(Organization).filter(Organization.name == organization_name).first()
         if existing_org:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Organization name already exists"
             )
-
+        
+        # Create new organization
         db_org = Organization(name=organization_name)
         db.add(db_org)
         db.commit()
         db.refresh(db_org)
-
+        
+        # Update user's organization
         db_user.organization_id = db_org.id
-        db_user.role = "admin"
+        db_user.role = "admin"  # Organization creator becomes admin
         db.commit()
         db.refresh(db_user)
-
-    # ✅ Step 6: Generate token
+    
+    # Create access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": db_user.email}, expires_delta=access_token_expires
     )
-
+    
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "requires_org_registration": False
+        "requires_org_registration": False  # Already handled in this flow
     }
-
 
 @app.post("/auth/register-organization")
 async def register_organization(
