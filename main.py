@@ -2221,19 +2221,18 @@ async def get_dashboard_data(
         start_date = end_date - timedelta(days=30)
         interval = "day"
 
+    # Base query with organization filter if needed
+    base_query = db.query(Report)
+    if current_user.role != "super_admin" and current_user.organization_id:
+        base_query = base_query.filter(Report.organization_id == current_user.organization_id)
+
     # Get counts for each status
-    counts_query = db.query(
+    counts = base_query.with_entities(
         func.count(Report.id).label("total"),
         func.count(case((Report.status == "pending", 1))).label("pending"),
         func.count(case((Report.status == "approved", 1))).label("approved"),
         func.count(case((Report.status == "rejected", 1))).label("rejected")
-    )
-
-    # Apply organization filter if not super admin
-    if current_user.role != "super_admin" and current_user.organization_id:
-        counts_query = counts_query.filter(Report.organization_id == current_user.organization_id)
-
-    counts = counts_query.first()
+    ).first()
 
     # Get trend data
     trend_data = []
@@ -2243,26 +2242,22 @@ async def get_dashboard_data(
             hour_start = start_date + timedelta(hours=i)
             hour_end = hour_start + timedelta(hours=1)
             
-            hour_counts = db.query(
+            hour_counts = base_query.filter(
+                Report.created_at >= hour_start,
+                Report.created_at < hour_end
+            ).with_entities(
                 func.count(Report.id).label("total"),
                 func.count(case((Report.status == "pending", 1))).label("pending"),
                 func.count(case((Report.status == "approved", 1))).label("approved"),
                 func.count(case((Report.status == "rejected", 1))).label("rejected")
-            ).filter(
-                Report.created_at >= hour_start,
-                Report.created_at < hour_end
-            )
+            ).first()
             
-            if current_user.role != "super_admin" and current_user.organization_id:
-                hour_counts = hour_counts.filter(Report.organization_id == current_user.organization_id)
-            
-            counts = hour_counts.first()
             trend_data.append({
                 "label": hour_start.strftime("%H:00"),
-                "total": counts.total or 0,
-                "pending": counts.pending or 0,
-                "approved": counts.approved or 0,
-                "rejected": counts.rejected or 0
+                "total": hour_counts.total or 0,
+                "pending": hour_counts.pending or 0,
+                "approved": hour_counts.approved or 0,
+                "rejected": hour_counts.rejected or 0
             })
     else:
         # Group by day for weekly/monthly view
@@ -2270,26 +2265,22 @@ async def get_dashboard_data(
         while current_date <= end_date:
             next_date = current_date + timedelta(days=1)
             
-            day_counts = db.query(
+            day_counts = base_query.filter(
+                Report.created_at >= current_date,
+                Report.created_at < next_date
+            ).with_entities(
                 func.count(Report.id).label("total"),
                 func.count(case((Report.status == "pending", 1))).label("pending"),
                 func.count(case((Report.status == "approved", 1))).label("approved"),
                 func.count(case((Report.status == "rejected", 1))).label("rejected")
-            ).filter(
-                Report.created_at >= current_date,
-                Report.created_at < next_date
-            )
+            ).first()
             
-            if current_user.role != "super_admin" and current_user.organization_id:
-                day_counts = day_counts.filter(Report.organization_id == current_user.organization_id)
-            
-            counts = day_counts.first()
             trend_data.append({
                 "label": current_date.strftime("%b %d"),
-                "total": counts.total or 0,
-                "pending": counts.pending or 0,
-                "approved": counts.approved or 0,
-                "rejected": counts.rejected or 0
+                "total": day_counts.total or 0,
+                "pending": day_counts.pending or 0,
+                "approved": day_counts.approved or 0,
+                "rejected": day_counts.rejected or 0
             })
             
             current_date = next_date
@@ -2310,20 +2301,15 @@ async def get_dashboard_data(
 
     # Get previous period data for trends
     prev_start_date = start_date - (end_date - start_date)
-    prev_counts_query = db.query(
+    prev_counts = base_query.filter(
+        Report.created_at >= prev_start_date,
+        Report.created_at < start_date
+    ).with_entities(
         func.count(Report.id).label("total"),
         func.count(case((Report.status == "pending", 1))).label("pending"),
         func.count(case((Report.status == "approved", 1))).label("approved"),
         func.count(case((Report.status == "rejected", 1))).label("rejected")
-    ).filter(
-        Report.created_at >= prev_start_date,
-        Report.created_at < start_date
-    )
-
-    if current_user.role != "super_admin" and current_user.organization_id:
-        prev_counts_query = prev_counts_query.filter(Report.organization_id == current_user.organization_id)
-
-    prev_counts = prev_counts_query.first()
+    ).first()
 
     trends = {
         "total": calculate_trend(counts.total or 0, prev_counts.total or 0),
@@ -2332,30 +2318,31 @@ async def get_dashboard_data(
         "rejected": calculate_trend(counts.rejected or 0, prev_counts.rejected or 0)
     }
 
-    # Get reports by category
-    category_query = db.query(
+    # Get reports by category with counts for each status
+    category_query = base_query.with_entities(
         Report.category,
-        func.count(Report.id).label("count")
+        func.count(Report.id).label("total"),
+        func.count(case((Report.status == "pending", 1))).label("pending"),
+        func.count(case((Report.status == "approved", 1))).label("approved"),
+        func.count(case((Report.status == "rejected", 1))).label("rejected")
     ).group_by(Report.category)
 
-    if current_user.role != "super_admin" and current_user.organization_id:
-        category_query = category_query.filter(Report.organization_id == current_user.organization_id)
-
     categories = category_query.all()
-    categories_data = [{"name": c[0], "count": c[1]} for c in categories]
+    categories_data = [{
+        "name": c[0],
+        "total": c[1],
+        "pending": c[2],
+        "approved": c[3],
+        "rejected": c[4]
+    } for c in categories]
 
-    # Get recent activity (last 5 reports and user actions)
-    recent_reports_query = db.query(Report).order_by(Report.created_at.desc())
-
-    if current_user.role != "super_admin" and current_user.organization_id:
-        recent_reports_query = recent_reports_query.filter(
-            Report.organization_id == current_user.organization_id
-        )
-
-    recent_reports = recent_reports_query.limit(5).all()
-
+    # Get recent activity (last 5 reports)
+    recent_reports = base_query.order_by(
+        Report.created_at.desc()
+    ).limit(5).all()
 
     recent_activity = []
+    recent_reports_data = []
     for report in recent_reports:
         recent_activity.append({
             "type": "report",
@@ -2364,10 +2351,7 @@ async def get_dashboard_data(
             "timestamp": report.created_at,
             "link": f"/reports/{report.id}"
         })
-
-    # Get recent reports for the table
-    recent_reports_data = []
-    for report in recent_reports:
+        
         recent_reports_data.append({
             "id": report.id,
             "title": report.title,
