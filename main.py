@@ -2221,10 +2221,19 @@ async def get_dashboard_data(
         start_date = end_date - timedelta(days=30)
         interval = "day"
 
-    # Base query with organization filter if needed
+    # Base query with tenant isolation
     base_query = db.query(Report)
-    if current_user.role != "super_admin" and current_user.organization_id:
+    
+    # Apply tenant isolation based on user role
+    if current_user.role == "super_admin":
+        # Super admins can see all data (across all tenants)
+        pass
+    elif current_user.organization_id:
+        # Regular users can only see their organization's data
         base_query = base_query.filter(Report.organization_id == current_user.organization_id)
+    else:
+        # Users without organization see nothing (or handle as needed)
+        base_query = base_query.filter(False)  # Returns empty result set
 
     # Get counts for each status
     counts = base_query.with_entities(
@@ -2234,10 +2243,9 @@ async def get_dashboard_data(
         func.count(case((Report.status == "rejected", 1))).label("rejected")
     ).first()
 
-    # Get trend data
+    # Get trend data with tenant isolation
     trend_data = []
     if interval == "hour":
-        # Group by hour for daily view
         for i in range(24):
             hour_start = start_date + timedelta(hours=i)
             hour_end = hour_start + timedelta(hours=1)
@@ -2260,7 +2268,6 @@ async def get_dashboard_data(
                 "rejected": hour_counts.rejected or 0
             })
     else:
-        # Group by day for weekly/monthly view
         current_date = start_date
         while current_date <= end_date:
             next_date = current_date + timedelta(days=1)
@@ -2282,26 +2289,26 @@ async def get_dashboard_data(
                 "approved": day_counts.approved or 0,
                 "rejected": day_counts.rejected or 0
             })
-            
             current_date = next_date
 
-    # Get categories data - properly formatted for JSON serialization
+    # Get categories with tenant isolation
     categories_query = base_query.with_entities(
         Report.category,
         func.count(Report.id)
     ).group_by(Report.category)
     
-    categories_results = categories_query.all()
-    categories_data = [{"name": cat[0], "count": cat[1]} for cat in categories_results]
+    categories_data = [
+        {"name": cat[0], "count": cat[1]} 
+        for cat in categories_query.all()
+    ]
 
-    # Calculate trends (percentage change from previous period)
+    # Calculate trends with tenant isolation
     def calculate_trend(current, previous):
         if previous == 0:
             return {"value": current, "percentage": 0}
         percentage = ((current - previous) / previous) * 100
         return {"value": current, "percentage": round(percentage, 1)}
 
-    # Get previous period data for trends
     prev_start_date = start_date - (end_date - start_date)
     prev_counts = base_query.filter(
         Report.created_at >= prev_start_date,
@@ -2320,7 +2327,7 @@ async def get_dashboard_data(
         "rejected": calculate_trend(counts.rejected or 0, prev_counts.rejected or 0)
     }
 
-    # Get recent activity (last 5 reports)
+    # Get recent activity with tenant isolation
     recent_reports = base_query.order_by(
         Report.created_at.desc()
     ).limit(5).all()
@@ -2335,7 +2342,6 @@ async def get_dashboard_data(
             "timestamp": report.created_at,
             "link": f"/reports/{report.id}"
         })
-        
         recent_reports_data.append({
             "id": report.id,
             "title": report.title,
@@ -2352,7 +2358,7 @@ async def get_dashboard_data(
             "rejected": counts.rejected or 0
         },
         "trends": trends,
-        "categories": categories_data,  # Now properly serializable
+        "categories": categories_data,
         "trend": {
             "labels": [item["label"] for item in trend_data],
             "total": [item["total"] for item in trend_data],
@@ -2361,7 +2367,12 @@ async def get_dashboard_data(
             "rejected": [item["rejected"] for item in trend_data]
         },
         "recentActivity": recent_activity,
-        "recentReports": recent_reports_data
+        "recentReports": recent_reports_data,
+        "tenant_info": {  # Added for debugging/multi-tenant awareness
+            "organization_id": current_user.organization_id,
+            "user_role": current_user.role,
+            "data_scope": "organization" if current_user.organization_id else "all" if current_user.role == "super_admin" else "none"
+        }
     }
     
 @app.post("/invitations/generate", response_model=dict)
