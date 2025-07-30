@@ -2602,7 +2602,7 @@ async def reset_password(
 async def send_password_reset_email(email: str, reset_token: str):
     """Send a password reset email with the token"""
     try:
-        reset_link = f"https://dariusmumbere.github.io/reset-password.html?token={reset_token}"
+        reset_link = f"https://dariusmumbere.github.io/reporting/reset-password.html?token={reset_token}"
         
         msg = MIMEMultipart()
         msg['From'] = EMAIL_FROM
