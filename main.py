@@ -814,7 +814,6 @@ async def verify_otp(
     
 @app.post("/auth/signup", response_model=Token)
 async def signup_user(
-    signup_token: str = Form(...), 
     name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
@@ -822,14 +821,6 @@ async def signup_user(
     invite_token: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    # Verify signup token
-    try:
-        payload = jwt.decode(signup_token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("email")
-        if not email:
-            raise HTTPException(status_code=400, detail="Invalid signup token")
-    except JWTError:
-        raise HTTPException(status_code=400, detail="Invalid signup token")
     # Check if email already exists
     existing_user = get_user(db, email)
     if existing_user:
