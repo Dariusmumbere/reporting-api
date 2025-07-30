@@ -789,7 +789,11 @@ async def send_verification_email_endpoint(
     return {"message": "Verification email sent"}
 
 @app.post("/auth/verify-otp")
-async def verify_otp(otp_request: VerifyOTPRequest, db: Session = Depends(get_db)):
+async def verify_otp(
+    otp_request: VerifyOTPRequest,
+    db: Session = Depends(get_db)
+):
+    # Find the verification record
     verification = db.query(EmailVerification).filter(
         EmailVerification.email == otp_request.email,
         EmailVerification.otp == otp_request.otp,
@@ -797,15 +801,16 @@ async def verify_otp(otp_request: VerifyOTPRequest, db: Session = Depends(get_db
     ).first()
     
     if not verification:
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP"
+        )
     
-    # Generate a one-time token for signup
-    signup_token = create_access_token(
-        data={"email": otp_request.email},
-        expires_delta=timedelta(minutes=30)
-    )
+    # Mark as verified
+    verification.is_verified = True
+    db.commit()
     
-    return {"signup_token": signup_token}
+    return {"message": "Email verified successfully"}
     
 @app.post("/auth/signup", response_model=Token)
 async def signup_user(
