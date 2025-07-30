@@ -490,6 +490,11 @@ class ReportTemplateInDB(ReportTemplateBase):
     class Config:
         from_attributes = True
 
+class UserBasicInfo(BaseModel):
+    id: int
+    name: str
+    email: str
+
 class InvitationResponse(BaseModel):
     id: int
     token: str
@@ -501,10 +506,6 @@ class InvitationResponse(BaseModel):
     class Config:
         orm_mode = True
 
-class UserBasicInfo(BaseModel):
-    id: int
-    name: str
-    email: str
     
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
