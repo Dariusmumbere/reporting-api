@@ -2221,36 +2221,41 @@ async def get_dashboard_data(
         start_date = end_date - timedelta(days=30)
         interval = "day"
 
-    # Base query with tenant isolation
+    # Base query with organization isolation
     base_query = db.query(Report)
     
-    # Apply tenant isolation based on user role
-    if current_user.role == "super_admin":
-        # Super admins can see all data (across all tenants)
-        pass
-    elif current_user.organization_id:
-        # Regular users can only see their organization's data
+    # Apply organization filter for all non-super-admin users
+    if current_user.role != "super_admin":
+        if not current_user.organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User must belong to an organization"
+            )
         base_query = base_query.filter(Report.organization_id == current_user.organization_id)
-    else:
-        # Users without organization see nothing (or handle as needed)
-        base_query = base_query.filter(False)  # Returns empty result set
 
-    # Get counts for each status
-    counts = base_query.with_entities(
+    # Apply additional filter for regular users (non-admin)
+    user_specific_query = base_query
+    if current_user.role not in ["admin", "super_admin"]:
+        user_specific_query = user_specific_query.filter(Report.author_id == current_user.id)
+
+    # Get counts for each status (organization-wide for admins, user-specific for regular users)
+    counts_query = base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
+    counts = counts_query.with_entities(
         func.count(Report.id).label("total"),
         func.count(case((Report.status == "pending", 1))).label("pending"),
         func.count(case((Report.status == "approved", 1))).label("approved"),
         func.count(case((Report.status == "rejected", 1))).label("rejected")
     ).first()
 
-    # Get trend data with tenant isolation
+    # Get trend data with proper isolation
     trend_data = []
     if interval == "hour":
         for i in range(24):
             hour_start = start_date + timedelta(hours=i)
             hour_end = hour_start + timedelta(hours=1)
             
-            hour_counts = base_query.filter(
+            trend_query = base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
+            hour_counts = trend_query.filter(
                 Report.created_at >= hour_start,
                 Report.created_at < hour_end
             ).with_entities(
@@ -2272,7 +2277,8 @@ async def get_dashboard_data(
         while current_date <= end_date:
             next_date = current_date + timedelta(days=1)
             
-            day_counts = base_query.filter(
+            trend_query = base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
+            day_counts = trend_query.filter(
                 Report.created_at >= current_date,
                 Report.created_at < next_date
             ).with_entities(
@@ -2291,18 +2297,19 @@ async def get_dashboard_data(
             })
             current_date = next_date
 
-    # Get categories with tenant isolation
-    categories_query = base_query.with_entities(
-        Report.category,
-        func.count(Report.id)
-    ).group_by(Report.category)
+    # Get categories with proper isolation
+    categories_query = (base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
+                      ).with_entities(
+                          Report.category,
+                          func.count(Report.id)
+                      ).group_by(Report.category)
     
     categories_data = [
         {"name": cat[0], "count": cat[1]} 
         for cat in categories_query.all()
     ]
 
-    # Calculate trends with tenant isolation
+    # Calculate trends with proper isolation
     def calculate_trend(current, previous):
         if previous == 0:
             return {"value": current, "percentage": 0}
@@ -2310,7 +2317,8 @@ async def get_dashboard_data(
         return {"value": current, "percentage": round(percentage, 1)}
 
     prev_start_date = start_date - (end_date - start_date)
-    prev_counts = base_query.filter(
+    prev_counts_query = base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
+    prev_counts = prev_counts_query.filter(
         Report.created_at >= prev_start_date,
         Report.created_at < start_date
     ).with_entities(
@@ -2327,10 +2335,10 @@ async def get_dashboard_data(
         "rejected": calculate_trend(counts.rejected or 0, prev_counts.rejected or 0)
     }
 
-    # Get recent activity with tenant isolation
-    recent_reports = base_query.order_by(
-        Report.created_at.desc()
-    ).limit(5).all()
+    # Get recent activity with proper isolation
+    recent_reports_query = (base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
+                          ).order_by(Report.created_at.desc()).limit(5)
+    recent_reports = recent_reports_query.all()
 
     recent_activity = []
     recent_reports_data = []
@@ -2368,11 +2376,7 @@ async def get_dashboard_data(
         },
         "recentActivity": recent_activity,
         "recentReports": recent_reports_data,
-        "tenant_info": {  # Added for debugging/multi-tenant awareness
-            "organization_id": current_user.organization_id,
-            "user_role": current_user.role,
-            "data_scope": "organization" if current_user.organization_id else "all" if current_user.role == "super_admin" else "none"
-        }
+        "data_scope": "organization" if current_user.role == "admin" else "personal" if current_user.role not in ["admin", "super_admin"] else "all"
     }
     
 @app.post("/invitations/generate", response_model=dict)
