@@ -2250,11 +2250,15 @@ async def get_dashboard_data(
     categories_data = [{"name": c[0], "count": c[1]} for c in categories]
 
     # Get recent activity (last 5 reports and user actions)
-    recent_reports_query = db.query(Report).order_by(Report.created_at.desc()).limit(5)
-    if current_user.role != "super_admin" and current_user.organization_id:
-        recent_reports_query = recent_reports_query.filter(Report.organization_id == current_user.organization_id)
+    recent_reports_query = db.query(Report).order_by(Report.created_at.desc())
 
-    recent_reports = recent_reports_query.all()
+    if current_user.role != "super_admin" and current_user.organization_id:
+        recent_reports_query = recent_reports_query.filter(
+            Report.organization_id == current_user.organization_id
+        )
+
+    recent_reports = recent_reports_query.limit(5).all()
+
 
     recent_activity = []
     for report in recent_reports:
