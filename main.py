@@ -8,6 +8,7 @@ from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from collections import defaultdict
 import os
 import uuid
 import json
@@ -2107,3 +2108,155 @@ async def delete_message(
         }), message.recipient_id)
     
     return {"message": "Message deleted successfully"}
+@app.get("/analytics")
+async def get_analytics(
+    period: str = "day",  # day, week, or month
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Calculate date ranges based on period
+    today = date.today()
+    start_date = today
+    
+    if period == "week":
+        start_date = today - timedelta(days=today.weekday())  # Start of current week
+    elif period == "month":
+        start_date = today.replace(day=1)  # Start of current month
+    
+    # For super admin, get all reports, otherwise filter by organization
+    if current_user.role == "super_admin":
+        reports_query = db.query(Report)
+    else:
+        reports_query = db.query(Report).filter(
+            Report.organization_id == current_user.organization_id
+        )
+    
+    # Status distribution (pie chart)
+    status_counts = reports_query.with_entities(
+        Report.status,
+        func.count(Report.id)
+    ).group_by(Report.status).all()
+    
+    status_distribution = {
+        "approved": 0,
+        "pending": 0,
+        "rejected": 0
+    }
+    
+    for status, count in status_counts:
+        status_lower = status.lower()
+        if status_lower in status_distribution:
+            status_distribution[status_lower] = count
+    
+    # Reports over time (line chart)
+    time_series = []
+    date_format = "%Y-%m-%d"
+    
+    if period == "day":
+        # Last 7 days
+        for i in range(6, -1, -1):
+            day = today - timedelta(days=i)
+            time_series.append(day.strftime(date_format))
+    elif period == "week":
+        # Last 8 weeks
+        for i in range(8, 0, -1):
+            week_start = today - timedelta(weeks=i)
+            time_series.append(f"Week {week_start.isocalendar()[1]}")
+    else:  # month
+        # Last 6 months
+        for i in range(5, -1, -1):
+            month = today.replace(month=today.month - i)
+            time_series.append(month.strftime("%b %Y"))
+    
+    reports_over_time = []
+    
+    if period == "day":
+        # Daily data for last 7 days
+        for i in range(6, -1, -1):
+            day = today - timedelta(days=i)
+            day_str = day.strftime(date_format)
+            
+            day_counts = reports_query.filter(
+                func.date(Report.created_at) == day
+            ).with_entities(
+                Report.status,
+                func.count(Report.id)
+            ).group_by(Report.status).all()
+            
+            counts = {"approved": 0, "pending": 0, "rejected": 0, "date": day_str}
+            
+            for status, count in day_counts:
+                status_lower = status.lower()
+                if status_lower in counts:
+                    counts[status_lower] = count
+            
+            reports_over_time.append(counts)
+    elif period == "week":
+        # Weekly data for last 8 weeks
+        for i in range(8, 0, -1):
+            week_start = today - timedelta(weeks=i)
+            week_end = week_start + timedelta(days=6)
+            
+            week_counts = reports_query.filter(
+                func.date(Report.created_at) >= week_start,
+                func.date(Report.created_at) <= week_end
+            ).with_entities(
+                Report.status,
+                func.count(Report.id)
+            ).group_by(Report.status).all()
+            
+            counts = {
+                "approved": 0, 
+                "pending": 0, 
+                "rejected": 0, 
+                "date": f"Week {week_start.isocalendar()[1]}"
+            }
+            
+            for status, count in week_counts:
+                status_lower = status.lower()
+                if status_lower in counts:
+                    counts[status_lower] = count
+            
+            reports_over_time.append(counts)
+    else:  # month
+        # Monthly data for last 6 months
+        for i in range(5, -1, -1):
+            month_start = today.replace(month=today.month - i, day=1)
+            next_month = month_start.replace(day=28) + timedelta(days=4)
+            month_end = next_month - timedelta(days=next_month.day)
+            
+            month_counts = reports_query.filter(
+                func.date(Report.created_at) >= month_start,
+                func.date(Report.created_at) <= month_end
+            ).with_entities(
+                Report.status,
+                func.count(Report.id)
+            ).group_by(Report.status).all()
+            
+            counts = {
+                "approved": 0, 
+                "pending": 0, 
+                "rejected": 0, 
+                "date": month_start.strftime("%b %Y")
+            }
+            
+            for status, count in month_counts:
+                status_lower = status.lower()
+                if status_lower in counts:
+                    counts[status_lower] = count
+            
+            reports_over_time.append(counts)
+    
+    # Category distribution (bar chart)
+    category_counts = reports_query.with_entities(
+        Report.category,
+        func.count(Report.id)
+    ).group_by(Report.category).all()
+    
+    category_distribution = {category: count for category, count in category_counts}
+    
+    return {
+        "status_distribution": status_distribution,
+        "reports_over_time": reports_over_time,
+        "category_distribution": category_distribution
+    }
