@@ -2355,7 +2355,7 @@ async def generate_invitation_link(
     db.refresh(invitation)
     
     # Generate the full invitation URL
-    invite_url = f"https://reporthub.com/signup?invite={token}"
+    invite_url = f"https://dariusmumbere.github.io/reporting?invite={token}"
     
     return {"invite_url": invite_url}
 
