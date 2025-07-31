@@ -2750,3 +2750,83 @@ async def mark_notification_as_read(
     db.refresh(notification)
     
     return notification
+@app.patch("/notifications/mark-all-read", response_model=dict)
+async def mark_all_notifications_as_read(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read == False
+    ).update({"is_read": True})
+    
+    db.commit()
+    
+    return {"message": "All notifications marked as read"}
+
+# Add these utility functions to your backend
+def create_notification(
+    db: Session,
+    user_id: int,
+    title: str,
+    message: str,
+    notification_type: str,
+    reference_id: Optional[int] = None
+):
+    notification = Notification(
+        user_id=user_id,
+        title=title,
+        message=message,
+        type=notification_type,
+        reference_id=reference_id
+    )
+    
+    db.add(notification)
+    db.commit()
+    
+    # If user is online, send real-time update via WebSocket
+    if user_id in manager.active_connections:
+        asyncio.create_task(manager.send_personal_message(json.dumps({
+            "type": "notification",
+            "notification": {
+                "id": notification.id,
+                "title": notification.title,
+                "message": notification.message,
+                "type": notification.type,
+                "reference_id": notification.reference_id,
+                "created_at": notification.created_at.isoformat()
+            }
+        }), user_id))
+    
+    return notification
+
+# Example usage in other endpoints:
+# When a report is approved/rejected
+def notify_report_status_change(db: Session, report: Report, status: str):
+    title = f"Report {status}"
+    message = f"Your report '{report.title}' has been {status}"
+    if status == "rejected" and report.admin_comments:
+        message += f": {report.admin_comments}"
+    
+    create_notification(
+        db=db,
+        user_id=report.author_id,
+        title=title,
+        message=message,
+        notification_type="report",
+        reference_id=report.id
+    )
+
+# When a new message is received
+def notify_new_message(db: Session, message: ChatMessage):
+    title = "New message"
+    message_text = f"New message from {message.sender.name}"
+    
+    create_notification(
+        db=db,
+        user_id=message.recipient_id,
+        title=title,
+        message=message_text,
+        notification_type="message",
+        reference_id=message.sender_id
+    )
