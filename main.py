@@ -2747,38 +2747,19 @@ async def get_profile_picture(
         # Extract the object key from the URL
         object_key = user.profile_picture.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
         
-        # Get the file from B2
-        response = b2_client.get_object(
-            Bucket=B2_BUCKET_NAME,
-            Key=object_key
+        # Generate a presigned URL that expires in 1 hour
+        presigned_url = b2_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': B2_BUCKET_NAME,
+                'Key': object_key
+            },
+            ExpiresIn=3600  # 1 hour expiration
         )
         
-        # Determine content type from file extension
-        content_type = "image/jpeg"  # default
-        if object_key.lower().endswith('.png'):
-            content_type = "image/png"
-        elif object_key.lower().endswith('.gif'):
-            content_type = "image/gif"
+        # Redirect to the presigned URL
+        return RedirectResponse(url=presigned_url)
         
-        # Get the ETag (unique identifier for the file)
-        etag = response['ETag'].strip('"')
-        
-        # Check for If-None-Match header (client caching)
-        if_none_match = request.headers.get('if-none-match')
-        if if_none_match and if_none_match == etag:
-            return Response(status_code=304)  # Not Modified
-        
-        # Stream the file back to the client with caching headers
-        return StreamingResponse(
-            response['Body'],
-            media_type=content_type,
-            headers={
-                'Content-Disposition': 'inline; filename="profile-picture"',
-                'Cache-Control': 'public, max-age=86400',  # Cache for 1 day
-                'ETag': etag,
-                'Last-Modified': response['LastModified'].strftime('%a, %d %b %Y %H:%M:%S GMT')
-            }
-        )
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchKey':
             raise HTTPException(status_code=404, detail="Profile picture not found")
