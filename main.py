@@ -610,35 +610,69 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[int, WebSocket] = {}
         self.user_status: Dict[int, str] = {}
+        self.notification_subscriptions: Set[int] = set()
 
     async def connect(self, websocket: WebSocket, user_id: int):
         await websocket.accept()
         self.active_connections[user_id] = websocket
         self.user_status[user_id] = "online"
+        self.notification_subscriptions.add(user_id)
         await self.broadcast_user_status(user_id, "online")
 
     def disconnect(self, user_id: int):
         if user_id in self.active_connections:
             del self.active_connections[user_id]
-            self.user_status[user_id] = "offline"
-            asyncio.create_task(self.broadcast_user_status(user_id, "offline"))
+        if user_id in self.notification_subscriptions:
+            self.notification_subscriptions.remove(user_id)
+        self.user_status[user_id] = "offline"
+        asyncio.create_task(self.broadcast_user_status(user_id, "offline"))
 
     async def send_personal_message(self, message: str, user_id: int):
         if user_id in self.active_connections:
-            await self.active_connections[user_id].send_text(message)
+            try:
+                await self.active_connections[user_id].send_text(message)
+            except Exception as e:
+                print(f"Error sending message to user {user_id}: {e}")
+                self.disconnect(user_id)
 
     async def broadcast_user_status(self, user_id: int, status: str):
         for connection in self.active_connections.values():
-            await connection.send_text(json.dumps({
-                "type": "user_status",
-                "user_id": user_id,
-                "status": status
-            }))
+            try:
+                await connection.send_text(json.dumps({
+                    "type": "user_status",
+                    "user_id": user_id,
+                    "status": status
+                }))
+            except Exception as e:
+                print(f"Error broadcasting user status: {e}")
+
+    async def broadcast_notification(self, user_id: int, notification: dict):
+        if user_id in self.notification_subscriptions and user_id in self.active_connections:
+            try:
+                await self.active_connections[user_id].send_text(json.dumps({
+                    "type": "new_notification",
+                    "notification": notification
+                }))
+                
+                # Also send updated unread count
+                db = SessionLocal()
+                unread_count = db.query(func.count(Notification.id)).filter(
+                    Notification.user_id == user_id,
+                    Notification.is_read == False
+                ).scalar()
+                db.close()
+                
+                await self.active_connections[user_id].send_text(json.dumps({
+                    "type": "unread_notification_count",
+                    "count": unread_count
+                }))
+            except Exception as e:
+                print(f"Error broadcasting notification: {e}")
 
 manager = ConnectionManager()
 
 # WebSocket endpoint for chat
-@app.websocket("/ws/chat")
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = None):
     try:
         # Authenticate user
@@ -672,7 +706,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
             "user_id": user.id
         }))
 
-        # Keep connection alive
+        # Get initial unread notifications count
+        unread_count = db.query(func.count(Notification.id)).filter(
+            Notification.user_id == user.id,
+            Notification.is_read == False
+        ).scalar()
+        
+        await websocket.send_text(json.dumps({
+            "type": "initial_notification_count",
+            "count": unread_count
+        }))
+
+        # Keep connection alive and handle messages
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
@@ -684,7 +729,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                     db_message = ChatMessage(
                         sender_id=user.id,
                         recipient_id=message["recipient_id"],
-                        content=message["content"],  # This should be the URL to the audio file
+                        content=message["content"],  # URL to the audio file
                         timestamp=datetime.utcnow(),
                         status="delivered",
                         message_type="voice"
@@ -703,6 +748,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                 db.add(db_message)
                 db.commit()
                 db.refresh(db_message)
+
+                # Create notification for recipient
+                sender_name = user.name
+                await create_notification(
+                    db,
+                    message["recipient_id"],
+                    "New Message",
+                    f"You received a new message from {sender_name}",
+                    "message",
+                    db_message.id
+                )
 
                 # Prepare response message
                 response_message = {
@@ -742,6 +798,40 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                 ).update({"status": "read"})
                 db.commit()
 
+            elif message["type"] == "notification_read":
+                # Mark notification as read
+                notification = db.query(Notification).filter(
+                    Notification.id == message["notification_id"],
+                    Notification.user_id == user.id
+                ).first()
+                
+                if notification:
+                    notification.is_read = True
+                    db.commit()
+                    
+                    # Update all clients for this user
+                    await manager.send_personal_message(json.dumps({
+                        "type": "notification_read",
+                        "notification_id": notification.id,
+                        "unread_count": db.query(func.count(Notification.id)).filter(
+                            Notification.user_id == user.id,
+                            Notification.is_read == False
+                        ).scalar()
+                    }), user.id)
+
+            elif message["type"] == "subscribe_notifications":
+                # Client is subscribing to notification updates
+                # This is handled by the connection manager
+                pass
+
+            elif message["type"] == "typing_indicator":
+                # Forward typing indicator to recipient
+                await manager.send_personal_message(json.dumps({
+                    "type": "typing_indicator",
+                    "sender_id": user.id,
+                    "is_typing": message["is_typing"]
+                }), message["recipient_id"])
+
     except WebSocketDisconnect:
         manager.disconnect(user.id)
     except Exception as e:
@@ -749,7 +839,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
         manager.disconnect(user.id)
     finally:
         db.close()
-
 # Auth routes
 @app.post("/auth/login", response_model=Token)
 async def login_for_access_token(
