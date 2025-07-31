@@ -306,6 +306,22 @@ class InvitationLink(Base):
 def init_default_admin():
     db = SessionLocal()
     try:
+        # Check if the profile_picture_url column exists
+        inspector = inspect(db.get_bind())
+        columns = inspector.get_columns('users')
+        column_names = [column['name'] for column in columns]
+        
+        # If the column doesn't exist, add it
+        if 'profile_picture_url' not in column_names:
+            try:
+                db.execute(text("ALTER TABLE users ADD COLUMN profile_picture_url VARCHAR(255)"))
+                db.commit()
+                print("Added profile_picture_url column to users table")
+            except Exception as e:
+                db.rollback()
+                print(f"Error adding profile_picture_url column: {e}")
+                raise
+
         # Check if any users exist
         user_count = db.query(User).count()
         if user_count == 0:
@@ -322,7 +338,8 @@ def init_default_admin():
                 email="superadmin@reporthub.com",
                 hashed_password=hashed_password,
                 role="super_admin",
-                organization_id=org.id
+                organization_id=org.id,
+                profile_picture_url=None  # Initialize as None
             )
             db.add(admin)
             db.commit()
