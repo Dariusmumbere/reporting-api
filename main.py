@@ -2905,45 +2905,127 @@ async def mark_all_notifications_as_read(
     db.commit()
     return {"message": "All notifications marked as read"}
 
-@app.get("/reports/export")
+from datetime import datetime, timedelta
+from fastapi import Query, HTTPException, status
+from fastapi.responses import StreamingResponse, JSONResponse
+from io import BytesIO, StringIO
+import pandas as pd
+from fpdf import FPDF
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+@app.get("/reports/export",
+         responses={
+             200: {
+                 "content": {
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {},
+                     "text/csv": {},
+                     "application/pdf": {}
+                 },
+                 "description": "Returns the exported file in requested format"
+             },
+             400: {"description": "Invalid parameters"},
+             401: {"description": "Unauthorized"},
+             403: {"description": "Forbidden"},
+             404: {"description": "No reports found"},
+             500: {"description": "Internal server error"}
+         })
 async def export_reports(
-    template_id: Optional[int] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    format: str = Query("excel"),
+    template_id: Optional[int] = Query(
+        None,
+        description="Filter by template ID",
+        example=4
+    ),
+    start_date: Optional[str] = Query(
+        None,
+        description="Start date in YYYY-MM-DD format",
+        example="2023-01-01",
+        regex="^\d{4}-\d{2}-\d{2}$"
+    ),
+    end_date: Optional[str] = Query(
+        None,
+        description="End date in YYYY-MM-DD format",
+        example="2023-12-31",
+        regex="^\d{4}-\d{2}-\d{2}$"
+    ),
+    status: Optional[str] = Query(
+        None,
+        description="Filter by status",
+        example="approved",
+        regex="^(pending|approved|rejected)$"
+    ),
+    format: str = Query(
+        "excel",
+        description="Export format",
+        example="excel",
+        regex="^(excel|csv|pdf)$"
+    ),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    """
+    Export reports based on filters in Excel, CSV or PDF format.
+    
+    Returns:
+        StreamingResponse: The exported file in requested format
+    """
     try:
-        # Validate parameters
+        # Validate and parse dates
+        start_date_obj = None
+        end_date_obj = None
+        
         if start_date:
             try:
-                start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
             except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD")
-        
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_date format. Use YYYY-MM-DD"
+                )
+
         if end_date:
             try:
-                end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+                end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
             except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end_date format. Use YYYY-MM-DD"
+                )
 
-        if status and status.lower() not in ['pending', 'approved', 'rejected']:
-            raise HTTPException(status_code=400, detail="Invalid status. Must be pending, approved, or rejected")
+        if start_date_obj and end_date_obj and start_date_obj > end_date_obj:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Start date cannot be after end date"
+            )
 
-        if format.lower() not in ['excel', 'csv', 'pdf']:
-            raise HTTPException(status_code=400, detail="Invalid format. Must be excel, csv, or pdf")
+        # Build base query
+        query = db.query(
+            Report.id,
+            Report.title,
+            Report.description,
+            Report.category,
+            Report.status,
+            Report.created_at,
+            Report.updated_at,
+            Report.admin_comments,
+            Report.template_data,
+            User.name.label("author_name"),
+            Organization.name.label("organization_name")
+        ).join(
+            User, Report.author_id == User.id
+        ).join(
+            Organization, Report.organization_id == Organization.id, isouter=True
+        )
 
-        format = format.lower()
-
-        # Build query
-        query = db.query(Report).join(User).join(Organization, isouter=True)
-        
-        # Apply filters based on user role
+        # Apply role-based filters
         if current_user.role != "super_admin":
             if current_user.organization_id is None:
-                raise HTTPException(status_code=403, detail="User must belong to an organization")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User must belong to an organization to export reports"
+                )
             query = query.filter(Report.organization_id == current_user.organization_id)
             
             if current_user.role != "admin":
@@ -2952,110 +3034,145 @@ async def export_reports(
         # Apply filters
         if template_id:
             query = query.filter(Report.template_data["template_id"].astext == str(template_id))
-        
-        if start_date:
-            query = query.filter(Report.created_at >= datetime.combine(start_date, datetime.min.time()))
-        
-        if end_date:
-            query = query.filter(Report.created_at <= datetime.combine(end_date, datetime.max.time()))
-        
+
+        if start_date_obj:
+            query = query.filter(Report.created_at >= datetime.combine(start_date_obj, datetime.min.time()))
+
+        if end_date_obj:
+            query = query.filter(Report.created_at <= datetime.combine(end_date_obj, datetime.max.time()))
+
         if status:
             query = query.filter(Report.status == status.lower())
 
-        reports = query.all()
+        # Execute query
+        reports = query.order_by(Report.created_at.desc()).all()
 
         if not reports:
-            raise HTTPException(status_code=404, detail="No reports found matching criteria")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No reports found matching the criteria"
+            )
 
-        # Prepare data
+        # Prepare data for export
         data = []
         for report in reports:
-            item = {
+            report_data = {
                 "ID": report.id,
                 "Title": report.title,
-                "Description": report.description,
+                "Description": report.description[:500],  # Limit description length
                 "Category": report.category,
                 "Status": report.status,
-                "Author": report.author.name,
-                "Organization": report.organization.name if report.organization else "None",
+                "Author": report.author_name,
+                "Organization": report.organization_name or "None",
                 "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else "",
-                "Admin Comments": report.admin_comments or ""
+                "Admin Comments": (report.admin_comments or "")[:500]  # Limit comment length
             }
-            
+
             if report.template_data:
                 for field, value in report.template_data.items():
                     if field != "template_id":
-                        item[field] = str(value)[:100]  # Limit field length
-            data.append(item)
+                        # Convert lists/dicts to JSON strings, others to string
+                        field_value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+                        report_data[field] = field_value[:200]  # Limit field value length
 
+            data.append(report_data)
+
+        # Create DataFrame
         df = pd.DataFrame(data)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"reports_export_{timestamp}"
 
-        if format == "csv":
+        # Handle different export formats
+        if format.lower() == "csv":
             output = StringIO()
-            df.to_csv(output, index=False)
+            df.to_csv(output, index=False, encoding='utf-8')
             output.seek(0)
+            
             return StreamingResponse(
                 iter([output.getvalue()]),
-                media_type="text/csv",
-                headers={"Content-Disposition": f"attachment; filename={filename}.csv"}
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}.csv",
+                    "Access-Control-Expose-Headers": "Content-Disposition"
+                }
             )
 
-        elif format == "pdf":
+        elif format.lower() == "pdf":
+            # PDF configuration
             pdf = FPDF()
             pdf.add_page()
             pdf.set_font("Arial", size=8)
             
-            # Add title
-            pdf.cell(0, 10, "ReportHub Export", 0, 1, 'C')
-            pdf.ln(5)
+            # Title
+            pdf.cell(200, 10, txt="ReportHub Export", ln=1, align='C')
+            pdf.cell(200, 10, txt=f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=1, align='C')
+            pdf.ln(10)
             
-            # Add table
-            col_widths = [15, 30, 40, 20, 15, 25, 25, 20, 20, 30]
+            # Table configuration
+            col_widths = [15, 30, 40, 20, 15, 25, 25, 20, 20, 30]  # Base widths
             headers = df.columns
             
-            # Header
-            pdf.set_font("Arial", "B", 8)
+            # Adjust column widths based on content
+            for i, col in enumerate(headers):
+                max_len = max(df[col].astype(str).apply(len).max(), len(col))
+                col_widths[i] = min(max_len * 1.5, 50)  # Cap at 50mm
+            
+            # Header row
+            pdf.set_font("Arial", 'B', 8)
             for i, header in enumerate(headers):
-                pdf.cell(col_widths[i], 10, header[:15], 1)
+                pdf.cell(col_widths[i], 10, header[:20], border=1)
             pdf.ln()
             
-            # Data
+            # Data rows
             pdf.set_font("Arial", size=7)
             for _, row in df.iterrows():
                 for i, header in enumerate(headers):
-                    pdf.cell(col_widths[i], 6, str(row[header])[:15], 1)
+                    cell_value = str(row[header])[:30]  # Limit cell content
+                    pdf.cell(col_widths[i], 6, cell_value, border=1)
                 pdf.ln()
             
+            # Prepare response
             output = BytesIO()
-            output.write(pdf.output(dest="S").encode("latin1"))
+            output.write(pdf.output(dest='S').encode('latin1'))
             output.seek(0)
+            
             return StreamingResponse(
                 output,
                 media_type="application/pdf",
-                headers={"Content-Disposition": f"attachment; filename={filename}.pdf"}
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}.pdf",
+                    "Access-Control-Expose-Headers": "Content-Disposition"
+                }
             )
 
-        else:  # Excel
+        else:  # Default to Excel
             output = BytesIO()
-            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                df.to_excel(writer, index=False, sheet_name="Reports")
-                worksheet = writer.sheets["Reports"]
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Reports')
+                
+                # Auto-adjust column widths
+                worksheet = writer.sheets['Reports']
                 for i, col in enumerate(df.columns):
                     max_len = max(df[col].astype(str).apply(len).max(), len(col)) + 2
-                    worksheet.set_column(i, i, min(max_len, 30))
+                    worksheet.set_column(i, i, min(max_len, 50))
             
             output.seek(0)
+            
             return StreamingResponse(
                 output,
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"}
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}.xlsx",
+                    "Access-Control-Expose-Headers": "Content-Disposition"
+                }
             )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Export failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to generate export")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while generating the export"
+        )
