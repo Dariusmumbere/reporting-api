@@ -197,8 +197,8 @@ class User(Base):
     attachments = relationship("Attachment", back_populates="uploader")
     sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
     received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
-    notifications = relationship("Notification", back_populates="user")
-    
+    User.notifications = relationship("Notification", back_populates="user")
+
 class Report(Base):
     __tablename__ = "reports"
 
@@ -311,11 +311,11 @@ class Notification(Base):
     message = Column(String, nullable=False)
     is_read = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    type = Column(String, nullable=False)  # e.g., "report", "message", "system"
-    reference_id = Column(Integer, nullable=True)  # ID of related item (report, message, etc.)
+    type = Column(String)  # e.g., "report", "message", "system"
+    related_id = Column(Integer)  # ID of related entity (report, message, etc.)
 
     user = relationship("User", back_populates="notifications")
-    
+
 # Initialize default admin user
 def init_default_admin():
     db = SessionLocal()
@@ -528,13 +528,11 @@ class InvitationResponse(BaseModel):
     class Config:
         orm_mode = True
 
-
-# Add to your Pydantic models section
 class NotificationBase(BaseModel):
     title: str
     message: str
-    type: str
-    reference_id: Optional[int] = None
+    type: Optional[str] = None
+    related_id: Optional[int] = None
 
 class NotificationInDB(NotificationBase):
     id: int
@@ -543,6 +541,7 @@ class NotificationInDB(NotificationBase):
 
     class Config:
         from_attributes = True
+        
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -638,21 +637,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-def generate_signed_url(b2_file_key: str, expiration: int = 3600) -> str:
-    """Generate a signed URL for a private B2 file"""
-    try:
-        url = b2_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': B2_BUCKET_NAME,
-                'Key': b2_file_key
-            },
-            ExpiresIn=expiration
-        )
-        return url
-    except ClientError as e:
-        print(f"Error generating signed URL: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate download URL")
 # WebSocket endpoint for chat
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, token: str = None):
@@ -1871,27 +1855,21 @@ async def upload_voice_message(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
-        # Generate unique filename
-        file_ext = os.path.splitext(voice_message.filename)[1]
-        filename = f"{uuid.uuid4()}{file_ext}"
-        object_key = f"voice_messages/{current_user.id}/{filename}"
+        # Validate file type
+        if not voice_message.content_type.startswith('audio/'):
+            raise HTTPException(
+                status_code=400,
+                detail="Only audio files are allowed"
+            )
+
+        # Upload the voice message to B2
+        file_url = await upload_to_b2(voice_message, f"voice_messages/{current_user.id}")
         
-        # Upload to B2
-        b2_client.upload_fileobj(
-            voice_message.file,
-            B2_BUCKET_NAME,
-            object_key,
-            ExtraArgs={'ContentType': voice_message.content_type}
-        )
-        
-        # Generate signed URL (valid for 1 hour)
-        signed_url = generate_signed_url(object_key)
-        
-        # Save to database with the object key (not the URL)
+        # Save message to database
         db_message = ChatMessage(
             sender_id=current_user.id,
             recipient_id=recipient_id,
-            content=object_key,  # Store the object key
+            content=file_url,  # Store just the URL
             timestamp=datetime.utcnow(),
             status="delivered",
             message_type="voice"
@@ -1903,34 +1881,16 @@ async def upload_voice_message(
 
         return {
             "id": db_message.id,
-            "object_key": object_key,
-            "signed_url": signed_url,  # Return the signed URL
-            "duration": duration,
+            "sender_id": db_message.sender_id,
+            "recipient_id": db_message.recipient_id,
+            "content": db_message.content,
             "timestamp": db_message.timestamp.isoformat(),
-            "status": db_message.status
+            "status": db_message.status,
+            "message_type": db_message.message_type,
+            "duration": duration
         }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/chat/voice-message/{message_id}/url")
-async def get_voice_message_url(
-    message_id: int,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    message = db.query(ChatMessage).filter(
-        ChatMessage.id == message_id,
-        (ChatMessage.sender_id == current_user.id) | 
-        (ChatMessage.recipient_id == current_user.id)
-    ).first()
-    
-    if not message or message.message_type != "voice":
-        raise HTTPException(status_code=404, detail="Voice message not found")
-    
-    try:
-        signed_url = generate_signed_url(message.content)
-        return {"signed_url": signed_url}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2697,7 +2657,6 @@ async def send_password_reset_email(email: str, reset_token: str):
     except Exception as e:
         print(f"Error sending password reset email: {e}")
         return False
-# Add to your FastAPI routes
 @app.get("/notifications", response_model=List[NotificationInDB])
 async def get_user_notifications(
     skip: int = 0,
@@ -2706,6 +2665,7 @@ async def get_user_notifications(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    """Get notifications for the current user with RBAC"""
     query = db.query(Notification).filter(
         Notification.user_id == current_user.id
     )
@@ -2724,6 +2684,7 @@ async def get_unread_notification_count(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    """Get count of unread notifications for the current user"""
     count = db.query(func.count(Notification.id)).filter(
         Notification.user_id == current_user.id,
         Notification.is_read == False
@@ -2737,6 +2698,7 @@ async def mark_notification_as_read(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    """Mark a notification as read (with ownership check)"""
     notification = db.query(Notification).filter(
         Notification.id == notification_id,
         Notification.user_id == current_user.id
@@ -2750,83 +2712,44 @@ async def mark_notification_as_read(
     db.refresh(notification)
     
     return notification
-@app.patch("/notifications/mark-all-read", response_model=dict)
-async def mark_all_notifications_as_read(
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    db.query(Notification).filter(
-        Notification.user_id == current_user.id,
-        Notification.is_read == False
-    ).update({"is_read": True})
-    
-    db.commit()
-    
-    return {"message": "All notifications marked as read"}
 
-# Add these utility functions to your backend
-def create_notification(
+async def create_notification(
     db: Session,
     user_id: int,
     title: str,
     message: str,
-    notification_type: str,
-    reference_id: Optional[int] = None
+    notification_type: str = None,
+    related_id: int = None
 ):
+    """Helper function to create a notification"""
     notification = Notification(
         user_id=user_id,
         title=title,
         message=message,
         type=notification_type,
-        reference_id=reference_id
+        related_id=related_id
     )
     
     db.add(notification)
     db.commit()
+    db.refresh(notification)
     
-    # If user is online, send real-time update via WebSocket
-    if user_id in manager.active_connections:
-        asyncio.create_task(manager.send_personal_message(json.dumps({
-            "type": "notification",
+    # Notify via WebSocket if user is online
+    await manager.send_personal_message(
+        json.dumps({
+            "type": "new_notification",
             "notification": {
                 "id": notification.id,
                 "title": notification.title,
                 "message": notification.message,
+                "is_read": notification.is_read,
+                "created_at": notification.created_at.isoformat(),
                 "type": notification.type,
-                "reference_id": notification.reference_id,
-                "created_at": notification.created_at.isoformat()
+                "related_id": notification.related_id
             }
-        }), user_id))
+        }),
+        user_id
+    )
     
     return notification
-
-# Example usage in other endpoints:
-# When a report is approved/rejected
-def notify_report_status_change(db: Session, report: Report, status: str):
-    title = f"Report {status}"
-    message = f"Your report '{report.title}' has been {status}"
-    if status == "rejected" and report.admin_comments:
-        message += f": {report.admin_comments}"
-    
-    create_notification(
-        db=db,
-        user_id=report.author_id,
-        title=title,
-        message=message,
-        notification_type="report",
-        reference_id=report.id
-    )
-
-# When a new message is received
-def notify_new_message(db: Session, message: ChatMessage):
-    title = "New message"
-    message_text = f"New message from {message.sender.name}"
-    
-    create_notification(
-        db=db,
-        user_id=message.recipient_id,
-        title=title,
-        message=message_text,
-        notification_type="message",
-        reference_id=message.sender_id
-    )
+        
