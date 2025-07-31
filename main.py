@@ -2656,6 +2656,7 @@ async def send_password_reset_email(email: str, reset_token: str):
     except Exception as e:
         print(f"Error sending password reset email: {e}")
         return False
+
 @app.post("/users/upload-profile-picture")
 async def upload_profile_picture(
     file: UploadFile = File(...),
@@ -2696,21 +2697,14 @@ async def upload_profile_picture(
             except Exception as e:
                 print(f"Error deleting old profile picture: {e}")
         
-        # Generate signed URL (expires in 7 days)
-        signed_url = b2_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': B2_BUCKET_NAME,
-                'Key': filename
-            },
-            ExpiresIn=604800  # 7 days in seconds
-        )
+        # Generate public URL (same format as attachments)
+        public_url = f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/{filename}"
         
         # Update user's profile picture URL
-        current_user.profile_picture = signed_url
+        current_user.profile_picture = public_url
         db.commit()
         
-        return {"profile_picture_url": signed_url}
+        return {"profile_picture_url": public_url}
     
     except Exception as e:
         print(f"Error uploading profile picture: {e}")
@@ -2738,3 +2732,44 @@ async def remove_profile_picture(
     except Exception as e:
         print(f"Error removing profile picture: {e}")
         raise HTTPException(status_code=500, detail="Failed to remove profile picture")
+
+@app.get("/users/profile-picture/{user_id}")
+async def get_profile_picture(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.profile_picture:
+        raise HTTPException(status_code=404, detail="Profile picture not found")
+    
+    try:
+        # Extract the object key from the URL
+        object_key = user.profile_picture.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
+        
+        # Get the file from B2
+        response = b2_client.get_object(
+            Bucket=B2_BUCKET_NAME,
+            Key=object_key
+        )
+        
+        # Determine content type from file extension
+        content_type = "image/jpeg"  # default
+        if object_key.lower().endswith('.png'):
+            content_type = "image/png"
+        elif object_key.lower().endswith('.gif'):
+            content_type = "image/gif"
+        
+        # Stream the file back to the client
+        return StreamingResponse(
+            response['Body'],
+            media_type=content_type,
+            headers={
+                'Content-Disposition': f'inline; filename="profile-picture"'
+            }
+        )
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            raise HTTPException(status_code=404, detail="Profile picture not found")
+        raise HTTPException(status_code=500, detail="Failed to retrieve profile picture")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
