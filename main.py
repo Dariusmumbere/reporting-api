@@ -331,7 +331,24 @@ def init_default_admin():
         raise e
     finally:
         db.close()
-        
+
+def add_column_if_not_exists(engine, table_name: str, column_name: str, column_type: str):
+    with engine.connect() as connection:
+        # Check if column exists
+        result = connection.execute(text(f"""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='{table_name}' AND column_name='{column_name}';
+        """))
+        if result.rowcount == 0:
+            # Add column if it does not exist
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type};"))
+            print(f"Column {column_name} added to {table_name}.")
+        else:
+            print(f"Column {column_name} already exists.")
+
+# Usage:
+add_column_if_not_exists(engine, "users", "profile_picture_url", "VARCHAR")
 # Reset database and initialize data
 init_default_admin()
 
