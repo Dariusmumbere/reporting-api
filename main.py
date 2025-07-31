@@ -2736,7 +2736,8 @@ async def remove_profile_picture(
 @app.get("/users/profile-picture/{user_id}")
 async def get_profile_picture(
     user_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    request: Request
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.profile_picture:
@@ -2759,12 +2760,23 @@ async def get_profile_picture(
         elif object_key.lower().endswith('.gif'):
             content_type = "image/gif"
         
-        # Stream the file back to the client
+        # Get the ETag (unique identifier for the file)
+        etag = response['ETag'].strip('"')
+        
+        # Check for If-None-Match header (client caching)
+        if_none_match = request.headers.get('if-none-match')
+        if if_none_match and if_none_match == etag:
+            return Response(status_code=304)  # Not Modified
+        
+        # Stream the file back to the client with caching headers
         return StreamingResponse(
             response['Body'],
             media_type=content_type,
             headers={
-                'Content-Disposition': f'inline; filename="profile-picture"'
+                'Content-Disposition': 'inline; filename="profile-picture"',
+                'Cache-Control': 'public, max-age=86400',  # Cache for 1 day
+                'ETag': etag,
+                'Last-Modified': response['LastModified'].strftime('%a, %d %b %Y %H:%M:%S GMT')
             }
         )
     except ClientError as e:
