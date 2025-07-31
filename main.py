@@ -321,6 +321,22 @@ class Notification(Base):
     link = Column(String, nullable=True)  # Optional link for the notification
 
     user = relationship("User", back_populates="notifications")
+
+class ExportHistory(Base):
+    __tablename__ = "export_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    template_id = Column(Integer, ForeignKey("report_templates.id"), nullable=True)
+    status_filter = Column(String, nullable=True)
+    date_from = Column(Date, nullable=True)
+    date_to = Column(Date, nullable=True)
+    format = Column(String, nullable=False)
+    record_count = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    template = relationship("ReportTemplate")
+    creator = relationship("User")
     
 # Initialize default admin user
 def init_default_admin():
@@ -571,33 +587,28 @@ class NotificationInDB(BaseModel):
     class Config:
         from_attributes = True
 
-class ExportQueryParams(BaseModel):
+class ExportRequest(BaseModel):
     template_id: Optional[int] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
     status: Optional[str] = None
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
     format: str = "excel"
 
-    @validator('start_date', 'end_date')
-    def validate_date_format(cls, v):
-        if v is None:
-            return v
-        try:
-            return datetime.strptime(v, "%Y-%m-%d").date()
-        except ValueError:
-            raise ValueError("Date must be in YYYY-MM-DD format")
+class ExportHistory(BaseModel):
+    id: int
+    template_id: Optional[int]
+    template_name: Optional[str]
+    status_filter: Optional[str]
+    date_from: Optional[date]
+    date_to: Optional[date]
+    format: str
+    record_count: int
+    created_at: datetime
+    created_by: int
+    created_by_name: str
 
-    @validator('status')
-    def validate_status(cls, v):
-        if v and v.lower() not in ['pending', 'approved', 'rejected']:
-            raise ValueError("Status must be one of: pending, approved, rejected")
-        return v.lower() if v else v
-
-    @validator('format')
-    def validate_format(cls, v):
-        if v.lower() not in ['excel', 'csv', 'pdf']:
-            raise ValueError("Format must be one of: excel, csv, pdf")
-        return v.lower()
+    class Config:
+        from_attributes = True
         
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -2904,199 +2915,259 @@ async def mark_all_notifications_as_read(
     ).update({"is_read": True})
     db.commit()
     return {"message": "All notifications marked as read"}
-
-@app.get("/reports/export")
+@app.post("/exports")
 async def export_reports(
-    template_id: Optional[int] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    format: str = Query("excel"),
+    export_request: ExportRequest,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    try:
-        # Validate parameters
-        errors = []
-        
-        if start_date:
-            try:
-                start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-            except ValueError:
-                errors.append("Invalid start_date format. Use YYYY-MM-DD")
-        
-        if end_date:
-            try:
-                end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
-            except ValueError:
-                errors.append("Invalid end_date format. Use YYYY-MM-DD")
-        
-        if status and status.lower() not in ['pending', 'approved', 'rejected']:
-            errors.append("Invalid status. Must be pending, approved, or rejected")
-        
-        if format.lower() not in ['excel', 'csv', 'pdf']:
-            errors.append("Invalid format. Must be excel, csv, or pdf")
-        
-        if errors:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "errors": errors}
+    # Build query based on filters
+    query = db.query(Report).join(User, Report.author_id == User.id)
+    
+    # For non-super admins, only show reports from their organization
+    if current_user.role != "super_admin":
+        if current_user.organization_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User must belong to an organization to export reports"
             )
-
-        # Build query
-        query = db.query(Report).join(User).join(Organization, isouter=True)
-        
-        # Apply role filters
-        if current_user.role != "super_admin":
-            if current_user.organization_id is None:
-                return JSONResponse(
-                    status_code=403,
-                    content={"success": False, "error": "User must belong to an organization"}
-                )
-            query = query.filter(Report.organization_id == current_user.organization_id)
-            
-            if current_user.role != "admin":
-                query = query.filter(Report.author_id == current_user.id)
-
-        # Apply filters
-        if template_id:
-            query = query.filter(Report.template_data["template_id"].astext == str(template_id))
-        
-        if start_date:
-            query = query.filter(Report.created_at >= datetime.combine(start_date, datetime.min.time()))
-        
-        if end_date:
-            query = query.filter(Report.created_at <= datetime.combine(end_date, datetime.max.time()))
-        
-        if status:
-            query = query.filter(Report.status == status.lower())
-
-        reports = query.all()
-
-        if not reports:
-            return JSONResponse(
-                status_code=404,
-                content={"success": False, "error": "No reports found matching criteria"}
-            )
-
-        # Prepare data
-        data = []
-        for report in reports:
-            item = {
-                "ID": report.id,
-                "Title": report.title,
-                "Description": report.description,
-                "Category": report.category,
-                "Status": report.status,
-                "Author": report.author.name,
-                "Organization": report.organization.name if report.organization else "None",
-                "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else "",
-                "Admin Comments": report.admin_comments or ""
-            }
-            
-            if report.template_data:
-                for field, value in report.template_data.items():
-                    if field != "template_id":
-                        item[field] = str(value)[:100]
-            data.append(item)
-
-
-        # Create DataFrame
-        df = pd.DataFrame(data)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"reports_export_{timestamp}"
-
-        # Handle different export formats
-        if format.lower() == "csv":
-            output = StringIO()
-            df.to_csv(output, index=False, encoding='utf-8')
-            output.seek(0)
-            
-            return StreamingResponse(
-                iter([output.getvalue()]),
-                media_type="text/csv; charset=utf-8",
-                headers={
-                    "Content-Disposition": f"attachment; filename={filename}.csv",
-                    "Access-Control-Expose-Headers": "Content-Disposition"
-                }
-            )
-
-        elif format.lower() == "pdf":
-            # PDF configuration
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=8)
-            
-            # Title
-            pdf.cell(200, 10, txt="ReportHub Export", ln=1, align='C')
-            pdf.cell(200, 10, txt=f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=1, align='C')
-            pdf.ln(10)
-            
-            # Table configuration
-            col_widths = [15, 30, 40, 20, 15, 25, 25, 20, 20, 30]  # Base widths
-            headers = df.columns
-            
-            # Adjust column widths based on content
-            for i, col in enumerate(headers):
-                max_len = max(df[col].astype(str).apply(len).max(), len(col))
-                col_widths[i] = min(max_len * 1.5, 50)  # Cap at 50mm
-            
-            # Header row
-            pdf.set_font("Arial", 'B', 8)
-            for i, header in enumerate(headers):
-                pdf.cell(col_widths[i], 10, header[:20], border=1)
-            pdf.ln()
-            
-            # Data rows
-            pdf.set_font("Arial", size=7)
-            for _, row in df.iterrows():
-                for i, header in enumerate(headers):
-                    cell_value = str(row[header])[:30]  # Limit cell content
-                    pdf.cell(col_widths[i], 6, cell_value, border=1)
-                pdf.ln()
-            
-            # Prepare response
-            output = BytesIO()
-            output.write(pdf.output(dest='S').encode('latin1'))
-            output.seek(0)
-            
-            return StreamingResponse(
-                output,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f"attachment; filename={filename}.pdf",
-                    "Access-Control-Expose-Headers": "Content-Disposition"
-                }
-            )
-
-        else:  # Default to Excel
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False, sheet_name='Reports')
-                
-                # Auto-adjust column widths
-                worksheet = writer.sheets['Reports']
-                for i, col in enumerate(df.columns):
-                    max_len = max(df[col].astype(str).apply(len).max(), len(col)) + 2
-                    worksheet.set_column(i, i, min(max_len, 50))
-            
-            output.seek(0)
-            
-            return StreamingResponse(
-                output,
-                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={
-                    "Content-Disposition": f"attachment; filename={filename}.xlsx",
-                    "Access-Control-Expose-Headers": "Content-Disposition"
-                }
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Export failed: {str(e)}", exc_info=True)
+        query = query.filter(Report.organization_id == current_user.organization_id)
+    
+    # Apply filters
+    if export_request.template_id:
+        query = query.filter(Report.template_id == export_request.template_id)
+    
+    if export_request.status:
+        query = query.filter(Report.status == export_request.status)
+    
+    if export_request.date_from:
+        query = query.filter(Report.created_at >= export_request.date_from)
+    
+    if export_request.date_to:
+        # Add 1 day to include the entire end date
+        end_date = export_request.date_to + timedelta(days=1)
+        query = query.filter(Report.created_at < end_date)
+    
+    # Execute query
+    reports = query.all()
+    
+    if not reports:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while generating the export"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No reports found matching the criteria"
         )
+    
+    # Convert to list of dictionaries
+    reports_data = []
+    for report in reports:
+        report_data = {
+            "id": report.id,
+            "title": report.title,
+            "description": report.description,
+            "category": report.category,
+            "status": report.status,
+            "author_name": report.author.name,
+            "created_at": report.created_at.isoformat(),
+            "template_data": report.template_data
+        }
+        reports_data.append(report_data)
+    
+    # Create export history record
+    db_export = ExportHistory(
+        template_id=export_request.template_id,
+        status_filter=export_request.status,
+        date_from=export_request.date_from,
+        date_to=export_request.date_to,
+        format=export_request.format,
+        record_count=len(reports_data),
+        created_by=current_user.id
+    )
+    db.add(db_export)
+    db.commit()
+    db.refresh(db_export)
+    
+    # Generate the export file based on format
+    if export_request.format == "json":
+        content = json.dumps(reports_data, indent=2)
+        media_type = "application/json"
+        filename = f"reports_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    elif export_request.format == "csv":
+        # Convert to CSV
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=reports_data[0].keys())
+        writer.writeheader()
+        writer.writerows(reports_data)
+        content = output.getvalue()
+        media_type = "text/csv"
+        filename = f"reports_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    else:  # excel
+        # Create Excel file
+        output = io.BytesIO()
+        workbook = Workbook(output)
+        worksheet = workbook.add_worksheet()
+        
+        # Write headers
+        headers = reports_data[0].keys()
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header)
+        
+        # Write data
+        for row, report in enumerate(reports_data, 1):
+            for col, key in enumerate(headers):
+                value = report[key]
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value)
+                worksheet.write(row, col, value)
+        
+        workbook.close()
+        content = output.getvalue()
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = f"reports_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    
+    # Return the file
+    return StreamingResponse(
+        io.BytesIO(content.encode() if isinstance(content, str) else content),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Content-Type": media_type
+        }
+    )
+
+@app.get("/exports/history", response_model=List[ExportHistory])
+async def get_export_history(
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # For non-super admins, only show their own export history
+    if current_user.role == "super_admin":
+        query = db.query(ExportHistory).join(User, ExportHistory.created_by == User.id)
+    else:
+        query = db.query(ExportHistory).join(User, ExportHistory.created_by == User.id).filter(
+            ExportHistory.created_by == current_user.id
+        )
+    
+    exports = query.offset(skip).limit(limit).all()
+    
+    # Format response with creator name
+    exports_data = []
+    for export in exports:
+        export_data = export.__dict__
+        creator = db.query(User).filter(User.id == export.created_by).first()
+        export_data["created_by_name"] = creator.name
+        
+        if export.template_id:
+            template = db.query(ReportTemplate).filter(ReportTemplate.id == export.template_id).first()
+            export_data["template_name"] = template.name if template else None
+        
+        exports_data.append(ExportHistory(**export_data))
+    
+    return exports_data
+
+@app.get("/exports/{export_id}")
+async def download_export(
+    export_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # For non-super admins, only allow downloading their own exports
+    export = db.query(ExportHistory).filter(ExportHistory.id == export_id).first()
+    if not export:
+        raise HTTPException(status_code=404, detail="Export not found")
+    
+    if current_user.role != "super_admin" and export.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this export")
+    
+    # In a real implementation, you would retrieve the actual export file
+    # For this example, we'll regenerate it based on the export parameters
+    
+    # Build query based on original filters
+    query = db.query(Report).join(User, Report.author_id == User.id)
+    
+    # Apply original filters
+    if export.template_id:
+        query = query.filter(Report.template_id == export.template_id)
+    
+    if export.status_filter:
+        query = query.filter(Report.status == export.status_filter)
+    
+    if export.date_from:
+        query = query.filter(Report.created_at >= export.date_from)
+    
+    if export.date_to:
+        end_date = export.date_to + timedelta(days=1)
+        query = query.filter(Report.created_at < end_date)
+    
+    # Execute query
+    reports = query.all()
+    
+    if not reports:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No reports found matching the original criteria"
+        )
+    
+    # Convert to list of dictionaries
+    reports_data = []
+    for report in reports:
+        report_data = {
+            "id": report.id,
+            "title": report.title,
+            "description": report.description,
+            "category": report.category,
+            "status": report.status,
+            "author_name": report.author.name,
+            "created_at": report.created_at.isoformat(),
+            "template_data": report.template_data
+        }
+        reports_data.append(report_data)
+    
+    # Generate the export file based on original format
+    if export.format == "json":
+        content = json.dumps(reports_data, indent=2)
+        media_type = "application/json"
+        filename = f"reports_export_{export_id}.json"
+    elif export.format == "csv":
+        # Convert to CSV
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=reports_data[0].keys())
+        writer.writeheader()
+        writer.writerows(reports_data)
+        content = output.getvalue()
+        media_type = "text/csv"
+        filename = f"reports_export_{export_id}.csv"
+    else:  # excel
+        # Create Excel file
+        output = io.BytesIO()
+        workbook = Workbook(output)
+        worksheet = workbook.add_worksheet()
+        
+        # Write headers
+        headers = reports_data[0].keys()
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header)
+        
+        # Write data
+        for row, report in enumerate(reports_data, 1):
+            for col, key in enumerate(headers):
+                value = report[key]
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value)
+                worksheet.write(row, col, value)
+        
+        workbook.close()
+        content = output.getvalue()
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = f"reports_export_{export_id}.xlsx"
+    
+    # Return the file
+    return StreamingResponse(
+        io.BytesIO(content.encode() if isinstance(content, str) else content),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Content-Type": media_type
+        }
+    )
