@@ -197,6 +197,7 @@ class User(Base):
     attachments = relationship("Attachment", back_populates="uploader")
     sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
     received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
+    profile_picture_url = Column(String, nullable=True)
 
 class Report(Base):
     __tablename__ = "reports"
@@ -380,6 +381,7 @@ class UserInDB(UserBase):
     last_active: Optional[datetime]
     organization_id: Optional[int]
     organization_name: Optional[str]
+    profile_picture_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -2629,3 +2631,119 @@ async def send_password_reset_email(email: str, reset_token: str):
     except Exception as e:
         print(f"Error sending password reset email: {e}")
         return False
+@app.post("/users/profile-picture")
+async def upload_profile_picture(
+    profile_picture: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    try:
+        # Validate file type
+        if not profile_picture.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only image files are allowed"
+            )
+        
+        # Validate file size (2MB max)
+        if profile_picture.size > 2 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File size must be less than 2MB"
+            )
+        
+        # Generate unique filename
+        file_ext = os.path.splitext(profile_picture.filename)[1]
+        filename = f"profile_pictures/{current_user.id}_{uuid.uuid4()}{file_ext}"
+        
+        # Upload to Backblaze B2
+        try:
+            b2_client.upload_fileobj(
+                profile_picture.file,
+                B2_BUCKET_NAME,
+                filename,
+                ExtraArgs={
+                    'ContentType': profile_picture.content_type,
+                    'ACL': 'private'  # Make the file private
+                }
+            )
+        except Exception as e:
+            print(f"Error uploading to B2: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to upload profile picture"
+            )
+        
+        # Generate signed URL that expires in 7 days
+        try:
+            signed_url = b2_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': B2_BUCKET_NAME,
+                    'Key': filename
+                },
+                ExpiresIn=604800  # 7 days in seconds
+            )
+        except Exception as e:
+            print(f"Error generating signed URL: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate profile picture URL"
+            )
+        
+        # Delete old profile picture if it exists
+        if current_user.profile_picture_url:
+            try:
+                old_key = current_user.profile_picture_url.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
+                b2_client.delete_object(Bucket=B2_BUCKET_NAME, Key=old_key)
+            except Exception as e:
+                print(f"Error deleting old profile picture: {e}")
+                # Don't fail the operation if deletion fails
+        
+        # Update user record with new profile picture URL
+        current_user.profile_picture_url = f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/{filename}"
+        db.commit()
+        
+        return {
+            "message": "Profile picture uploaded successfully",
+            "profile_picture_url": signed_url  # Return the signed URL
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise e
+
+@app.get("/users/profile-picture-url")
+async def get_profile_picture_url(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    if not current_user.profile_picture_url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No profile picture found"
+        )
+    
+    try:
+        # Extract the key from the URL
+        key = current_user.profile_picture_url.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
+        
+        # Generate a new signed URL
+        signed_url = b2_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': B2_BUCKET_NAME,
+                'Key': key
+            },
+            ExpiresIn=604800  # 7 days in seconds
+        )
+        
+        return {
+            "profile_picture_url": signed_url
+        }
+    except Exception as e:
+        print(f"Error generating signed URL: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate profile picture URL"
+        )
