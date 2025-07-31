@@ -23,6 +23,8 @@ from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import text
 import boto3
 from botocore.exceptions import ClientError
+from io import BytesIO
+import pandas as pd
 
 # Backblaze B2 Configuration
 B2_BUCKET_NAME = "uploads-dir"
@@ -2870,3 +2872,98 @@ async def mark_all_notifications_as_read(
     ).update({"is_read": True})
     db.commit()
     return {"message": "All notifications marked as read"}
+@app.get("/templates/{template_id}/reports/export")
+async def export_template_reports_to_excel(
+    template_id: int,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Verify template exists and user has access
+    if current_user.role == "super_admin":
+        template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id
+        ).first()
+    else:
+        template = db.query(ReportTemplate).filter(
+            ReportTemplate.id == template_id,
+            ReportTemplate.organization_id == current_user.organization_id
+        ).first()
+    
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Get all reports for this template
+    query = db.query(Report).filter(
+        Report.template_id == template_id
+    )
+    
+    # Apply sorting
+    if sort_by == "created_at":
+        if sort_order == "asc":
+            query = query.order_by(Report.created_at.asc())
+        else:
+            query = query.order_by(Report.created_at.desc())
+    elif sort_by == "status":
+        if sort_order == "asc":
+            query = query.order_by(Report.status.asc())
+        else:
+            query = query.order_by(Report.status.desc())
+    elif sort_by == "category":
+        if sort_order == "asc":
+            query = query.order_by(Report.category.asc())
+        else:
+            query = query.order_by(Report.category.desc())
+    
+    reports = query.all()
+    
+    # Prepare data for Excel
+    data = []
+    for report in reports:
+        report_data = {
+            "ID": report.id,
+            "Title": report.title,
+            "Author": report.author.name,
+            "Status": report.status,
+            "Category": report.category,
+            "Created At": report.created_at.strftime("%Y-%m-%d %H:%M"),
+            "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M") if report.updated_at else ""
+        }
+        
+        # Add template fields
+        if report.template_data:
+            for field_name, field_value in report.template_data.items():
+                # Handle different field types
+                if isinstance(field_value, list):
+                    report_data[field_name] = ", ".join(str(v) for v in field_value)
+                elif isinstance(field_value, dict):
+                    report_data[field_name] = json.dumps(field_value)
+                else:
+                    report_data[field_name] = str(field_value)
+        
+        data.append(report_data)
+    
+    # Create DataFrame
+    df = pd.DataFrame(data)
+    
+    # Create Excel file in memory
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, sheet_name='Reports', index=False)
+        
+        # Auto-adjust columns' width
+        worksheet = writer.sheets['Reports']
+        for i, col in enumerate(df.columns):
+            max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
+            worksheet.set_column(i, i, max_len)
+    
+    output.seek(0)
+    
+    # Create streaming response
+    filename = f"reports_template_{template_id}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
