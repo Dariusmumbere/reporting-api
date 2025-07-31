@@ -197,7 +197,7 @@ class User(Base):
     attachments = relationship("Attachment", back_populates="uploader")
     sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
     received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
-    User.notifications = relationship("Notification", back_populates="user")
+    notifications = relationship("Notification", back_populates="user")
 
 class Report(Base):
     __tablename__ = "reports"
