@@ -609,6 +609,21 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+def generate_signed_url(b2_file_key: str, expiration: int = 3600) -> str:
+    """Generate a signed URL for a private B2 file"""
+    try:
+        url = b2_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': B2_BUCKET_NAME,
+                'Key': b2_file_key
+            },
+            ExpiresIn=expiration
+        )
+        return url
+    except ClientError as e:
+        print(f"Error generating signed URL: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate download URL")
 # WebSocket endpoint for chat
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, token: str = None):
@@ -1827,21 +1842,27 @@ async def upload_voice_message(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
-        # Validate file type
-        if not voice_message.content_type.startswith('audio/'):
-            raise HTTPException(
-                status_code=400,
-                detail="Only audio files are allowed"
-            )
-
-        # Upload the voice message to B2
-        file_url = await upload_to_b2(voice_message, f"voice_messages/{current_user.id}")
+        # Generate unique filename
+        file_ext = os.path.splitext(voice_message.filename)[1]
+        filename = f"{uuid.uuid4()}{file_ext}"
+        object_key = f"voice_messages/{current_user.id}/{filename}"
         
-        # Save message to database
+        # Upload to B2
+        b2_client.upload_fileobj(
+            voice_message.file,
+            B2_BUCKET_NAME,
+            object_key,
+            ExtraArgs={'ContentType': voice_message.content_type}
+        )
+        
+        # Generate signed URL (valid for 1 hour)
+        signed_url = generate_signed_url(object_key)
+        
+        # Save to database with the object key (not the URL)
         db_message = ChatMessage(
             sender_id=current_user.id,
             recipient_id=recipient_id,
-            content=file_url,  # Store just the URL
+            content=object_key,  # Store the object key
             timestamp=datetime.utcnow(),
             status="delivered",
             message_type="voice"
@@ -1853,16 +1874,34 @@ async def upload_voice_message(
 
         return {
             "id": db_message.id,
-            "sender_id": db_message.sender_id,
-            "recipient_id": db_message.recipient_id,
-            "content": db_message.content,
+            "object_key": object_key,
+            "signed_url": signed_url,  # Return the signed URL
+            "duration": duration,
             "timestamp": db_message.timestamp.isoformat(),
-            "status": db_message.status,
-            "message_type": db_message.message_type,
-            "duration": duration
+            "status": db_message.status
         }
-    except HTTPException:
-        raise
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat/voice-message/{message_id}/url")
+async def get_voice_message_url(
+    message_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    message = db.query(ChatMessage).filter(
+        ChatMessage.id == message_id,
+        (ChatMessage.sender_id == current_user.id) | 
+        (ChatMessage.recipient_id == current_user.id)
+    ).first()
+    
+    if not message or message.message_type != "voice":
+        raise HTTPException(status_code=404, detail="Voice message not found")
+    
+    try:
+        signed_url = generate_signed_url(message.content)
+        return {"signed_url": signed_url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
