@@ -1827,6 +1827,13 @@ async def upload_voice_message(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
+        # Validate file type
+        if not voice_message.content_type.startswith('audio/'):
+            raise HTTPException(
+                status_code=400,
+                detail="Only audio files are allowed"
+            )
+
         # Upload the voice message to B2
         file_url = await upload_to_b2(voice_message, f"voice_messages/{current_user.id}")
         
@@ -1834,7 +1841,7 @@ async def upload_voice_message(
         db_message = ChatMessage(
             sender_id=current_user.id,
             recipient_id=recipient_id,
-            content=f"[VOICE_MESSAGE]{file_url}",
+            content=file_url,  # Store just the URL
             timestamp=datetime.utcnow(),
             status="delivered",
             message_type="voice"
@@ -1854,6 +1861,8 @@ async def upload_voice_message(
             "message_type": db_message.message_type,
             "duration": duration
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
