@@ -2921,11 +2921,11 @@ async def export_reports(
             )
         
         # Validate status if provided
-        valid_statuses = ["draft", "submitted", "approved", "rejected"]
+        valid_statuses = ["pending", "approved", "rejected", "draft", "submitted"]
         if status and status not in valid_statuses:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+                detail=f"Invalid status '{status}'. Must be one of: {', '.join(valid_statuses)}"
             )
         
         # Validate export format
@@ -2933,7 +2933,7 @@ async def export_reports(
         if format not in valid_formats:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Invalid format. Must be one of: {', '.join(valid_formats)}"
+                detail=f"Invalid format '{format}'. Must be one of: {', '.join(valid_formats)}"
             )
         
         # Build the base query
@@ -2956,7 +2956,7 @@ async def export_reports(
         # Apply template filter if provided
         if template_id:
             # Verify template exists
-            template_exists = db.query(Template).filter(Template.id == template_id).first()
+            template_exists = db.query(ReportTemplate).filter(ReportTemplate.id == template_id).first()
             if not template_exists:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -3004,7 +3004,8 @@ async def export_reports(
                     "Author": author.name if author else "Unknown",
                     "Organization": organization.name if organization else "No Organization",
                     "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else ""
+                    "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else "",
+                    "Admin Comments": report.admin_comments or ""
                 }
                 
                 # Add template fields if this report has template data
