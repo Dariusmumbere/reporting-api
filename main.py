@@ -198,6 +198,7 @@ class User(Base):
     sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
     received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
     profile_picture = Column(String, nullable=True)
+    notifications = relationship("Notification", back_populates="user")
 
 class Report(Base):
     __tablename__ = "reports"
@@ -301,6 +302,19 @@ class InvitationLink(Base):
 
     created_by = relationship("User", foreign_keys=[created_by_id])
     organization = relationship("Organization")
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    link = Column(String, nullable=True)  # Optional link for the notification
+
+    user = relationship("User", back_populates="notifications")
     
 # Initialize default admin user
 def init_default_admin():
@@ -540,7 +554,17 @@ class InvitationResponse(BaseModel):
     class Config:
         orm_mode = True
 
-    
+class NotificationInDB(BaseModel):
+    id: int
+    title: str
+    message: str
+    is_read: bool
+    created_at: datetime
+    link: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+        
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2785,3 +2809,64 @@ async def get_profile_picture(
             status_code=500,
             detail=str(e)
         )
+# Notification endpoints
+@app.get("/notifications", response_model=List[NotificationInDB])
+async def get_user_notifications(
+    skip: int = 0,
+    limit: int = 10,
+    unread_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    query = db.query(Notification).filter(
+        Notification.user_id == current_user.id
+    ).order_by(
+        Notification.created_at.desc()
+    )
+    
+    if unread_only:
+        query = query.filter(Notification.is_read == False)
+    
+    notifications = query.offset(skip).limit(limit).all()
+    return notifications
+
+@app.get("/notifications/unread-count", response_model=int)
+async def get_unread_notification_count(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    count = db.query(func.count(Notification.id)).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read == False
+    ).scalar()
+    return count or 0
+
+@app.post("/notifications/{notification_id}/mark-read")
+async def mark_notification_as_read(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == current_user.id
+    ).first()
+    
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    
+    notification.is_read = True
+    db.commit()
+    return {"message": "Notification marked as read"}
+
+@app.post("/notifications/mark-all-read")
+async def mark_all_notifications_as_read(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read == False
+    ).update({"is_read": True})
+    db.commit()
+    return {"message": "All notifications marked as read"}
