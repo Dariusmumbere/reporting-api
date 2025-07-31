@@ -2736,8 +2736,8 @@ async def remove_profile_picture(
 @app.get("/users/profile-picture/{user_id}")
 async def get_profile_picture(
     user_id: int,
-    db: Session = Depends(get_db),
-    request: Request
+    request: Request,  # Moved before parameter with default
+    db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.profile_picture:
