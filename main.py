@@ -2915,6 +2915,7 @@ async def mark_all_notifications_as_read(
     ).update({"is_read": True})
     db.commit()
     return {"message": "All notifications marked as read"}
+    
 @app.post("/exports")
 async def export_reports(
     export_request: ExportRequest,
@@ -2933,9 +2934,10 @@ async def export_reports(
             )
         query = query.filter(Report.organization_id == current_user.organization_id)
     
-    # Apply filters
+    # Apply filters - modified to use template_data instead of template_id
     if export_request.template_id:
-        query = query.filter(Report.template_id == export_request.template_id)
+        # Assuming template_data contains an 'id' field
+        query = query.filter(Report.template_data['id'].astext.cast(Integer) == export_request.template_id)
     
     if export_request.status:
         query = query.filter(Report.status == export_request.status)
@@ -3042,12 +3044,10 @@ async def get_export_history(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     # For non-super admins, only show their own export history
-    if current_user.role == "super_admin":
-        query = db.query(ExportHistory).join(User, ExportHistory.created_by == User.id)
-    else:
-        query = db.query(ExportHistory).join(User, ExportHistory.created_by == User.id).filter(
-            ExportHistory.created_by == current_user.id
-        )
+    query = db.query(ExportHistory).join(User, ExportHistory.created_by == User.id)
+    
+    if current_user.role != "super_admin":
+        query = query.filter(ExportHistory.created_by == current_user.id)
     
     exports = query.offset(skip).limit(limit).all()
     
@@ -3055,8 +3055,11 @@ async def get_export_history(
     exports_data = []
     for export in exports:
         export_data = export.__dict__
+        if '_sa_instance_state' in export_data:
+            del export_data['_sa_instance_state']
+            
         creator = db.query(User).filter(User.id == export.created_by).first()
-        export_data["created_by_name"] = creator.name
+        export_data["created_by_name"] = creator.name if creator else None
         
         if export.template_id:
             template = db.query(ReportTemplate).filter(ReportTemplate.id == export.template_id).first()
