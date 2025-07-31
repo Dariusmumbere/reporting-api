@@ -2905,126 +2905,53 @@ async def mark_all_notifications_as_read(
     db.commit()
     return {"message": "All notifications marked as read"}
 
-from datetime import datetime, timedelta
-from fastapi import Query, HTTPException, status
-from fastapi.responses import StreamingResponse, JSONResponse
-from io import BytesIO, StringIO
-import pandas as pd
-from fpdf import FPDF
-import logging
-from typing import Optional
-
-logger = logging.getLogger(__name__)
-
-@app.get("/reports/export",
-         responses={
-             200: {
-                 "content": {
-                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {},
-                     "text/csv": {},
-                     "application/pdf": {}
-                 },
-                 "description": "Returns the exported file in requested format"
-             },
-             400: {"description": "Invalid parameters"},
-             401: {"description": "Unauthorized"},
-             403: {"description": "Forbidden"},
-             404: {"description": "No reports found"},
-             500: {"description": "Internal server error"}
-         })
+@app.get("/reports/export")
 async def export_reports(
-    template_id: Optional[int] = Query(
-        None,
-        description="Filter by template ID",
-        example=4
-    ),
-    start_date: Optional[str] = Query(
-        None,
-        description="Start date in YYYY-MM-DD format",
-        example="2023-01-01",
-        regex="^\d{4}-\d{2}-\d{2}$"
-    ),
-    end_date: Optional[str] = Query(
-        None,
-        description="End date in YYYY-MM-DD format",
-        example="2023-12-31",
-        regex="^\d{4}-\d{2}-\d{2}$"
-    ),
-    status: Optional[str] = Query(
-        None,
-        description="Filter by status",
-        example="approved",
-        regex="^(pending|approved|rejected)$"
-    ),
-    format: str = Query(
-        "excel",
-        description="Export format",
-        example="excel",
-        regex="^(excel|csv|pdf)$"
-    ),
+    template_id: Optional[int] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    format: str = Query("excel"),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    """
-    Export reports based on filters in Excel, CSV or PDF format.
-    
-    Returns:
-        StreamingResponse: The exported file in requested format
-    """
     try:
-        # Validate and parse dates
-        start_date_obj = None
-        end_date_obj = None
+        # Validate parameters
+        errors = []
         
         if start_date:
             try:
-                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+                start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
             except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid start_date format. Use YYYY-MM-DD"
-                )
-
+                errors.append("Invalid start_date format. Use YYYY-MM-DD")
+        
         if end_date:
             try:
-                end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+                end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
             except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid end_date format. Use YYYY-MM-DD"
-                )
-
-        if start_date_obj and end_date_obj and start_date_obj > end_date_obj:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Start date cannot be after end date"
+                errors.append("Invalid end_date format. Use YYYY-MM-DD")
+        
+        if status and status.lower() not in ['pending', 'approved', 'rejected']:
+            errors.append("Invalid status. Must be pending, approved, or rejected")
+        
+        if format.lower() not in ['excel', 'csv', 'pdf']:
+            errors.append("Invalid format. Must be excel, csv, or pdf")
+        
+        if errors:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "errors": errors}
             )
 
-        # Build base query
-        query = db.query(
-            Report.id,
-            Report.title,
-            Report.description,
-            Report.category,
-            Report.status,
-            Report.created_at,
-            Report.updated_at,
-            Report.admin_comments,
-            Report.template_data,
-            User.name.label("author_name"),
-            Organization.name.label("organization_name")
-        ).join(
-            User, Report.author_id == User.id
-        ).join(
-            Organization, Report.organization_id == Organization.id, isouter=True
-        )
-
-        # Apply role-based filters
+        # Build query
+        query = db.query(Report).join(User).join(Organization, isouter=True)
+        
+        # Apply role filters
         if current_user.role != "super_admin":
             if current_user.organization_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="User must belong to an organization to export reports"
+                return JSONResponse(
+                    status_code=403,
+                    content={"success": False, "error": "User must belong to an organization"}
                 )
             query = query.filter(Report.organization_id == current_user.organization_id)
             
@@ -3034,49 +2961,46 @@ async def export_reports(
         # Apply filters
         if template_id:
             query = query.filter(Report.template_data["template_id"].astext == str(template_id))
-
-        if start_date_obj:
-            query = query.filter(Report.created_at >= datetime.combine(start_date_obj, datetime.min.time()))
-
-        if end_date_obj:
-            query = query.filter(Report.created_at <= datetime.combine(end_date_obj, datetime.max.time()))
-
+        
+        if start_date:
+            query = query.filter(Report.created_at >= datetime.combine(start_date, datetime.min.time()))
+        
+        if end_date:
+            query = query.filter(Report.created_at <= datetime.combine(end_date, datetime.max.time()))
+        
         if status:
             query = query.filter(Report.status == status.lower())
 
-        # Execute query
-        reports = query.order_by(Report.created_at.desc()).all()
+        reports = query.all()
 
         if not reports:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No reports found matching the criteria"
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": "No reports found matching criteria"}
             )
 
-        # Prepare data for export
+        # Prepare data
         data = []
         for report in reports:
-            report_data = {
+            item = {
                 "ID": report.id,
                 "Title": report.title,
-                "Description": report.description[:500],  # Limit description length
+                "Description": report.description,
                 "Category": report.category,
                 "Status": report.status,
-                "Author": report.author_name,
-                "Organization": report.organization_name or "None",
+                "Author": report.author.name,
+                "Organization": report.organization.name if report.organization else "None",
                 "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else "",
-                "Admin Comments": (report.admin_comments or "")[:500]  # Limit comment length
+                "Admin Comments": report.admin_comments or ""
             }
-
+            
             if report.template_data:
                 for field, value in report.template_data.items():
                     if field != "template_id":
-                        # Convert lists/dicts to JSON strings, others to string
-                        field_value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
-                        report_data[field] = field_value[:200]  # Limit field value length
+                        item[field] = str(value)[:100]
+            data.append(item)
 
-            data.append(report_data)
 
         # Create DataFrame
         df = pd.DataFrame(data)
