@@ -197,6 +197,7 @@ class User(Base):
     attachments = relationship("Attachment", back_populates="uploader")
     sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
     received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
+    profile_picture = Column(String, nullable=True)
 
 class Report(Base):
     __tablename__ = "reports"
@@ -330,6 +331,31 @@ def init_default_admin():
         raise e
     finally:
         db.close()
+
+# Add this as a one-time migration script
+def add_profile_picture_column():
+    db = SessionLocal()
+    try:
+        # Check if the column already exists
+        inspector = inspect(db.get_bind())
+        columns = inspector.get_columns('users')
+        column_names = [column['name'] for column in columns]
+        
+        if 'profile_picture' not in column_names:
+            # Add the column
+            db.execute(text("ALTER TABLE users ADD COLUMN profile_picture VARCHAR"))
+            db.commit()
+            print("Added profile_picture column to users table")
+        else:
+            print("profile_picture column already exists")
+    except Exception as e:
+        db.rollback()
+        print(f"Error adding profile_picture column: {e}")
+    finally:
+        db.close()
+
+# Run the migration
+add_profile_picture_column()
         
 # Reset database and initialize data
 init_default_admin()
@@ -380,6 +406,7 @@ class UserInDB(UserBase):
     last_active: Optional[datetime]
     organization_id: Optional[int]
     organization_name: Optional[str]
+    profile_picture: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -2629,3 +2656,85 @@ async def send_password_reset_email(email: str, reset_token: str):
     except Exception as e:
         print(f"Error sending password reset email: {e}")
         return False
+@app.post("/users/upload-profile-picture")
+async def upload_profile_picture(
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/gif"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Only JPEG, PNG, and GIF images are allowed")
+    
+    # Validate file size (max 5MB)
+    max_size = 5 * 1024 * 1024  # 5MB
+    file.file.seek(0, 2)  # Move to end of file
+    file_size = file.file.tell()
+    file.file.seek(0)  # Reset file pointer
+    if file_size > max_size:
+        raise HTTPException(status_code=400, detail="File size exceeds 5MB limit")
+    
+    try:
+        # Generate a unique filename
+        file_ext = os.path.splitext(file.filename)[1]
+        filename = f"profile_pictures/{current_user.id}/{uuid.uuid4()}{file_ext}"
+        
+        # Upload to Backblaze B2
+        b2_client.upload_fileobj(
+            file.file,
+            B2_BUCKET_NAME,
+            filename,
+            ExtraArgs={'ContentType': file.content_type}
+        )
+        
+        # Delete old profile picture if it exists
+        if current_user.profile_picture:
+            try:
+                old_key = current_user.profile_picture.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
+                b2_client.delete_object(Bucket=B2_BUCKET_NAME, Key=old_key)
+            except Exception as e:
+                print(f"Error deleting old profile picture: {e}")
+        
+        # Generate signed URL (expires in 7 days)
+        signed_url = b2_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': B2_BUCKET_NAME,
+                'Key': filename
+            },
+            ExpiresIn=604800  # 7 days in seconds
+        )
+        
+        # Update user's profile picture URL
+        current_user.profile_picture = signed_url
+        db.commit()
+        
+        return {"profile_picture_url": signed_url}
+    
+    except Exception as e:
+        print(f"Error uploading profile picture: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload profile picture")
+
+@app.delete("/users/remove-profile-picture")
+async def remove_profile_picture(
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    if not current_user.profile_picture:
+        raise HTTPException(status_code=400, detail="No profile picture to remove")
+    
+    try:
+        # Delete from Backblaze B2
+        key = current_user.profile_picture.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
+        b2_client.delete_object(Bucket=B2_BUCKET_NAME, Key=key)
+        
+        # Update user record
+        current_user.profile_picture = None
+        db.commit()
+        
+        return {"message": "Profile picture removed successfully"}
+    
+    except Exception as e:
+        print(f"Error removing profile picture: {e}")
+        raise HTTPException(status_code=500, detail="Failed to remove profile picture")
