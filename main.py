@@ -26,6 +26,9 @@ from botocore.exceptions import ClientError
 from io import BytesIO, StringIO
 import pandas as pd
 from fpdf import FPDF
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Backblaze B2 Configuration
 B2_BUCKET_NAME = "uploads-dir"
@@ -2884,7 +2887,55 @@ async def export_reports(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    """
+    Export reports based on filtering criteria.
+    
+    Args:
+        template_id: Filter by template ID
+        start_date: Start date filter (YYYY-MM-DD format)
+        end_date: End date filter (YYYY-MM-DD format)
+        status: Filter by report status
+        format: Export format (excel, csv, or pdf)
+        db: Database session
+        current_user: Authenticated user
+    
+    Returns:
+        StreamingResponse with the exported file
+    """
     try:
+        # Validate date format if provided
+        try:
+            start_date_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+            end_date_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid date format. Please use YYYY-MM-DD"
+            )
+        
+        # Validate date range
+        if start_date_dt and end_date_dt and start_date_dt > end_date_dt:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Start date cannot be after end date"
+            )
+        
+        # Validate status if provided
+        valid_statuses = ["draft", "submitted", "approved", "rejected"]
+        if status and status not in valid_statuses:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            )
+        
+        # Validate export format
+        valid_formats = ["excel", "csv", "pdf"]
+        if format not in valid_formats:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid format. Must be one of: {', '.join(valid_formats)}"
+            )
+        
         # Build the base query
         query = db.query(Report)
         
@@ -2904,16 +2955,22 @@ async def export_reports(
         
         # Apply template filter if provided
         if template_id:
+            # Verify template exists
+            template_exists = db.query(Template).filter(Template.id == template_id).first()
+            if not template_exists:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Template with ID {template_id} not found"
+                )
             query = query.filter(Report.template_id == template_id)
         
         # Apply date range filter if provided
-        if start_date:
-            start_date = datetime.strptime(start_date, "%Y-%m-%d")
-            query = query.filter(Report.created_at >= start_date)
+        if start_date_dt:
+            query = query.filter(Report.created_at >= start_date_dt)
         
-        if end_date:
-            end_date = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
-            query = query.filter(Report.created_at < end_date)
+        if end_date_dt:
+            # Include the entire end date by adding one day
+            query = query.filter(Report.created_at < end_date_dt + timedelta(days=1))
         
         # Apply status filter if provided
         if status:
@@ -2932,99 +2989,137 @@ async def export_reports(
         export_data = []
         
         for report in reports:
-            # Get author and organization names
-            author = db.query(User).filter(User.id == report.author_id).first()
-            organization = db.query(Organization).filter(Organization.id == report.organization_id).first() if report.organization_id else None
-            
-            # Base report data
-            report_data = {
-                "ID": report.id,
-                "Title": report.title,
-                "Description": report.description,
-                "Category": report.category,
-                "Status": report.status,
-                "Author": author.name if author else "Unknown",
-                "Organization": organization.name if organization else "No Organization",
-                "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else ""
-            }
-            
-            # Add template fields if this report has template data
-            if report.template_data:
-                for field_name, field_value in report.template_data.items():
-                    # Format field name for display (replace underscores with spaces and capitalize)
-                    display_name = field_name.replace("_", " ").title()
-                    
-                    # Handle array values (for checkboxes, etc.)
-                    if isinstance(field_value, list):
-                        report_data[display_name] = ", ".join(str(v) for v in field_value)
-                    else:
-                        report_data[display_name] = str(field_value) if field_value is not None else ""
-            
-            export_data.append(report_data)
+            try:
+                # Get author and organization names
+                author = db.query(User).filter(User.id == report.author_id).first()
+                organization = db.query(Organization).filter(Organization.id == report.organization_id).first() if report.organization_id else None
+                
+                # Base report data
+                report_data = {
+                    "ID": report.id,
+                    "Title": report.title,
+                    "Description": report.description or "",
+                    "Category": report.category or "",
+                    "Status": report.status,
+                    "Author": author.name if author else "Unknown",
+                    "Organization": organization.name if organization else "No Organization",
+                    "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else ""
+                }
+                
+                # Add template fields if this report has template data
+                if report.template_data:
+                    for field_name, field_value in report.template_data.items():
+                        try:
+                            # Format field name for display
+                            display_name = field_name.replace("_", " ").title()
+                            
+                            # Handle different field value types
+                            if field_value is None:
+                                report_data[display_name] = ""
+                            elif isinstance(field_value, list):
+                                report_data[display_name] = ", ".join(str(v) for v in field_value)
+                            elif isinstance(field_value, dict):
+                                report_data[display_name] = str(field_value)
+                            else:
+                                report_data[display_name] = str(field_value)
+                        except Exception as field_error:
+                            logger.warning(f"Error processing field {field_name}: {str(field_error)}")
+                            report_data[display_name] = "[Error processing value]"
+                
+                export_data.append(report_data)
+            except Exception as report_error:
+                logger.error(f"Error processing report {report.id}: {str(report_error)}")
+                continue
+        
+        if not export_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No valid report data to export"
+            )
         
         # Generate the export file based on requested format
-        if format == "excel":
-            return export_to_excel(export_data)
-        elif format == "csv":
-            return export_to_csv(export_data)
-        elif format == "pdf":
-            return export_to_pdf(export_data)
-        else:
+        try:
+            if format == "excel":
+                return export_to_excel(export_data)
+            elif format == "csv":
+                return export_to_csv(export_data)
+            elif format == "pdf":
+                return export_to_pdf(export_data)
+        except Exception as export_error:
+            logger.error(f"Export error: {str(export_error)}")
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid export format"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Error generating export file"
             )
             
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Unexpected error in export_reports: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error exporting reports: {str(e)}"
+            detail="An unexpected error occurred while exporting reports"
         )
 
-def export_to_excel(data):
+def export_to_excel(data: list[dict]) -> StreamingResponse:
+    """Export data to Excel format."""
     try:
-        import pandas as pd
-        from io import BytesIO
-        
         # Create a DataFrame from the data
         df = pd.DataFrame(data)
         
         # Create an Excel file in memory
         output = BytesIO()
-        writer = pd.ExcelWriter(output, engine='xlsxwriter')
-        df.to_excel(writer, index=False, sheet_name='Reports')
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Reports')
+            
+            # Get worksheet and format
+            worksheet = writer.sheets['Reports']
+            header_format = writer.book.add_format({
+                'bold': True,
+                'text_wrap': True,
+                'border': 1,
+                'bg_color': '#F7F7F7'
+            })
+            
+            # Apply header format
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            
+            # Auto-adjust column widths
+            for i, col in enumerate(df.columns):
+                max_len = max(
+                    df[col].astype(str).map(len).max(),
+                    len(col)
+                ) + 2  # Add a little extra space
+                worksheet.set_column(i, i, min(max_len, 50))  # Cap at 50 chars
         
-        # Auto-adjust column widths
-        for column in df:
-            column_length = max(df[column].astype(str).map(len).max(), len(column))
-            col_idx = df.columns.get_loc(column)
-            writer.sheets['Reports'].set_column(col_idx, col_idx, column_length)
-        
-        writer.close()
         output.seek(0)
         
-        # Return the Excel file
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"reports_export_{timestamp}.xlsx"
+        
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={
-                "Content-Disposition": "attachment; filename=reports.xlsx"
-            }
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
     except ImportError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Excel export requires pandas and xlsxwriter packages"
         )
+    except Exception as e:
+        logger.error(f"Excel export error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error generating Excel export"
+        )
 
-def export_to_csv(data):
+def export_to_csv(data: list[dict]) -> StreamingResponse:
+    """Export data to CSV format."""
     try:
-        import pandas as pd
-        from io import StringIO
-        
         # Create a DataFrame from the data
         df = pd.DataFrame(data)
         
@@ -3033,69 +3128,99 @@ def export_to_csv(data):
         df.to_csv(output, index=False)
         output.seek(0)
         
-        # Return the CSV file
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"reports_export_{timestamp}.csv"
+        
         return StreamingResponse(
             output,
             media_type="text/csv",
-            headers={
-                "Content-Disposition": "attachment; filename=reports.csv"
-            }
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
     except ImportError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="CSV export requires pandas package"
         )
+    except Exception as e:
+        logger.error(f"CSV export error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error generating CSV export"
+        )
 
-def export_to_pdf(data):
+def export_to_pdf(data: list[dict]) -> StreamingResponse:
+    """Export data to PDF format."""
     try:
-        from fpdf import FPDF
-        from io import BytesIO
-        
         # Create PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", size=10)
         
         # Add title
+        pdf.set_font("Arial", 'B', 16)
         pdf.cell(200, 10, txt="ReportHub - Exported Reports", ln=1, align='C')
+        pdf.set_font("Arial", size=10)
         pdf.ln(10)
         
-        # Get all column names
+        # Add filters info
+        pdf.cell(200, 10, txt=f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=1)
+        pdf.ln(5)
+        
         if not data:
             pdf.cell(200, 10, txt="No reports found", ln=1, align='C')
         else:
             columns = list(data[0].keys())
-            
-            # Set column widths
             col_widths = [pdf.get_string_width(col) + 6 for col in columns]
             
+            # Adjust column widths to not exceed page width
+            total_width = sum(col_widths)
+            if total_width > 190:  # Page width is about 210mm
+                scale_factor = 190 / total_width
+                col_widths = [int(w * scale_factor) for w in col_widths]
+            
             # Add header
+            pdf.set_fill_color(200, 200, 200)
             for i, col in enumerate(columns):
-                pdf.cell(col_widths[i], 10, txt=col, border=1)
+                pdf.cell(col_widths[i], 10, txt=col, border=1, fill=True)
             pdf.ln()
             
             # Add data rows
+            pdf.set_fill_color(255, 255, 255)
+            fill = False
             for row in data:
                 for i, col in enumerate(columns):
-                    pdf.cell(col_widths[i], 10, txt=str(row[col]), border=1)
+                    # Truncate long text to fit in cell
+                    cell_text = str(row[col])
+                    if pdf.get_string_width(cell_text) > col_widths[i] - 2:
+                        max_chars = int(len(cell_text) * (col_widths[i] - 2) / pdf.get_string_width(cell_text))
+                        cell_text = cell_text[:max(max_chars - 3, 1)] + "..."
+                    pdf.cell(col_widths[i], 10, txt=cell_text, border=1, fill=fill)
                 pdf.ln()
+                fill = not fill
         
         # Save to buffer
         buffer = BytesIO()
         pdf.output(buffer)
         buffer.seek(0)
         
-        # Return the PDF file
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"reports_export_{timestamp}.pdf"
+        
         return StreamingResponse(
             buffer,
             media_type="application/pdf",
-            headers={
-                "Content-Disposition": "attachment; filename=reports.pdf"
-            }
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
     except ImportError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="PDF export requires fpdf2 package"
+        )
+    except Exception as e:
+        logger.error(f"PDF export error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error generating PDF export"
         )
