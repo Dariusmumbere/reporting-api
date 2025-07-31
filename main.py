@@ -197,7 +197,8 @@ class User(Base):
     attachments = relationship("Attachment", back_populates="uploader")
     sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
     received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
-
+    notifications = relationship("Notification", back_populates="user")
+    
 class Report(Base):
     __tablename__ = "reports"
 
@@ -300,6 +301,20 @@ class InvitationLink(Base):
 
     created_by = relationship("User", foreign_keys=[created_by_id])
     organization = relationship("Organization")
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    type = Column(String, nullable=False)  # e.g., "report", "message", "system"
+    reference_id = Column(Integer, nullable=True)  # ID of related item (report, message, etc.)
+
+    user = relationship("User", back_populates="notifications")
     
 # Initialize default admin user
 def init_default_admin():
@@ -513,7 +528,21 @@ class InvitationResponse(BaseModel):
     class Config:
         orm_mode = True
 
-    
+
+# Add to your Pydantic models section
+class NotificationBase(BaseModel):
+    title: str
+    message: str
+    type: str
+    reference_id: Optional[int] = None
+
+class NotificationInDB(NotificationBase):
+    id: int
+    is_read: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2668,3 +2697,56 @@ async def send_password_reset_email(email: str, reset_token: str):
     except Exception as e:
         print(f"Error sending password reset email: {e}")
         return False
+# Add to your FastAPI routes
+@app.get("/notifications", response_model=List[NotificationInDB])
+async def get_user_notifications(
+    skip: int = 0,
+    limit: int = 10,
+    unread_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    query = db.query(Notification).filter(
+        Notification.user_id == current_user.id
+    )
+    
+    if unread_only:
+        query = query.filter(Notification.is_read == False)
+    
+    notifications = query.order_by(
+        Notification.created_at.desc()
+    ).offset(skip).limit(limit).all()
+    
+    return notifications
+
+@app.get("/notifications/unread-count", response_model=dict)
+async def get_unread_notification_count(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    count = db.query(func.count(Notification.id)).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read == False
+    ).scalar()
+    
+    return {"count": count}
+
+@app.patch("/notifications/{notification_id}/read", response_model=NotificationInDB)
+async def mark_notification_as_read(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == current_user.id
+    ).first()
+    
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    
+    notification.is_read = True
+    db.commit()
+    db.refresh(notification)
+    
+    return notification
