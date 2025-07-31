@@ -2872,98 +2872,229 @@ async def mark_all_notifications_as_read(
     ).update({"is_read": True})
     db.commit()
     return {"message": "All notifications marked as read"}
-@app.get("/templates/{template_id}/reports/export")
-async def export_template_reports_to_excel(
-    template_id: int,
-    sort_by: str = "created_at",
-    sort_order: str = "desc",
+
+@app.get("/reports/export")
+async def export_reports(
+    template_id: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    format: str = "excel",
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Verify template exists and user has access
-    if current_user.role == "super_admin":
-        template = db.query(ReportTemplate).filter(
-            ReportTemplate.id == template_id
-        ).first()
-    else:
-        template = db.query(ReportTemplate).filter(
-            ReportTemplate.id == template_id,
-            ReportTemplate.organization_id == current_user.organization_id
-        ).first()
-    
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
+    try:
+        # Build the base query
+        query = db.query(Report)
+        
+        # Apply filters based on user role
+        if current_user.role != "super_admin":
+            if current_user.organization_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User must belong to an organization to export reports"
+                )
+            
+            query = query.filter(Report.organization_id == current_user.organization_id)
+            
+            # For non-admin users, only their own reports
+            if current_user.role != "admin":
+                query = query.filter(Report.author_id == current_user.id)
+        
+        # Apply template filter if provided
+        if template_id:
+            query = query.filter(Report.template_id == template_id)
+        
+        # Apply date range filter if provided
+        if start_date:
+            start_date = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.filter(Report.created_at >= start_date)
+        
+        if end_date:
+            end_date = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.filter(Report.created_at < end_date)
+        
+        # Apply status filter if provided
+        if status:
+            query = query.filter(Report.status == status)
+        
+        # Get the reports
+        reports = query.order_by(Report.created_at.desc()).all()
+        
+        if not reports:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No reports found matching the criteria"
+            )
+        
+        # Prepare the data for export
+        export_data = []
+        
+        for report in reports:
+            # Get author and organization names
+            author = db.query(User).filter(User.id == report.author_id).first()
+            organization = db.query(Organization).filter(Organization.id == report.organization_id).first() if report.organization_id else None
+            
+            # Base report data
+            report_data = {
+                "ID": report.id,
+                "Title": report.title,
+                "Description": report.description,
+                "Category": report.category,
+                "Status": report.status,
+                "Author": author.name if author else "Unknown",
+                "Organization": organization.name if organization else "No Organization",
+                "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else ""
+            }
+            
+            # Add template fields if this report has template data
+            if report.template_data:
+                for field_name, field_value in report.template_data.items():
+                    # Format field name for display (replace underscores with spaces and capitalize)
+                    display_name = field_name.replace("_", " ").title()
+                    
+                    # Handle array values (for checkboxes, etc.)
+                    if isinstance(field_value, list):
+                        report_data[display_name] = ", ".join(str(v) for v in field_value)
+                    else:
+                        report_data[display_name] = str(field_value) if field_value is not None else ""
+            
+            export_data.append(report_data)
+        
+        # Generate the export file based on requested format
+        if format == "excel":
+            return export_to_excel(export_data)
+        elif format == "csv":
+            return export_to_csv(export_data)
+        elif format == "pdf":
+            return export_to_pdf(export_data)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid export format"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error exporting reports: {str(e)}"
+        )
 
-    # Get all reports for this template
-    query = db.query(Report).filter(
-        Report.template_id == template_id
-    )
-    
-    # Apply sorting
-    if sort_by == "created_at":
-        if sort_order == "asc":
-            query = query.order_by(Report.created_at.asc())
-        else:
-            query = query.order_by(Report.created_at.desc())
-    elif sort_by == "status":
-        if sort_order == "asc":
-            query = query.order_by(Report.status.asc())
-        else:
-            query = query.order_by(Report.status.desc())
-    elif sort_by == "category":
-        if sort_order == "asc":
-            query = query.order_by(Report.category.asc())
-        else:
-            query = query.order_by(Report.category.desc())
-    
-    reports = query.all()
-    
-    # Prepare data for Excel
-    data = []
-    for report in reports:
-        report_data = {
-            "ID": report.id,
-            "Title": report.title,
-            "Author": report.author.name,
-            "Status": report.status,
-            "Category": report.category,
-            "Created At": report.created_at.strftime("%Y-%m-%d %H:%M"),
-            "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M") if report.updated_at else ""
-        }
+def export_to_excel(data):
+    try:
+        import pandas as pd
+        from io import BytesIO
         
-        # Add template fields
-        if report.template_data:
-            for field_name, field_value in report.template_data.items():
-                # Handle different field types
-                if isinstance(field_value, list):
-                    report_data[field_name] = ", ".join(str(v) for v in field_value)
-                elif isinstance(field_value, dict):
-                    report_data[field_name] = json.dumps(field_value)
-                else:
-                    report_data[field_name] = str(field_value)
+        # Create a DataFrame from the data
+        df = pd.DataFrame(data)
         
-        data.append(report_data)
-    
-    # Create DataFrame
-    df = pd.DataFrame(data)
-    
-    # Create Excel file in memory
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, sheet_name='Reports', index=False)
+        # Create an Excel file in memory
+        output = BytesIO()
+        writer = pd.ExcelWriter(output, engine='xlsxwriter')
+        df.to_excel(writer, index=False, sheet_name='Reports')
         
-        # Auto-adjust columns' width
-        worksheet = writer.sheets['Reports']
-        for i, col in enumerate(df.columns):
-            max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
-            worksheet.set_column(i, i, max_len)
-    
-    output.seek(0)
-    
-    # Create streaming response
-    filename = f"reports_template_{template_id}_{datetime.now().strftime('%Y%m%d')}.xlsx"
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
+        # Auto-adjust column widths
+        for column in df:
+            column_length = max(df[column].astype(str).map(len).max(), len(column))
+            col_idx = df.columns.get_loc(column)
+            writer.sheets['Reports'].set_column(col_idx, col_idx, column_length)
+        
+        writer.close()
+        output.seek(0)
+        
+        # Return the Excel file
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": "attachment; filename=reports.xlsx"
+            }
+        )
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Excel export requires pandas and xlsxwriter packages"
+        )
+
+def export_to_csv(data):
+    try:
+        import pandas as pd
+        from io import StringIO
+        
+        # Create a DataFrame from the data
+        df = pd.DataFrame(data)
+        
+        # Create a CSV file in memory
+        output = StringIO()
+        df.to_csv(output, index=False)
+        output.seek(0)
+        
+        # Return the CSV file
+        return StreamingResponse(
+            output,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=reports.csv"
+            }
+        )
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="CSV export requires pandas package"
+        )
+
+def export_to_pdf(data):
+    try:
+        from fpdf import FPDF
+        from io import BytesIO
+        
+        # Create PDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=10)
+        
+        # Add title
+        pdf.cell(200, 10, txt="ReportHub - Exported Reports", ln=1, align='C')
+        pdf.ln(10)
+        
+        # Get all column names
+        if not data:
+            pdf.cell(200, 10, txt="No reports found", ln=1, align='C')
+        else:
+            columns = list(data[0].keys())
+            
+            # Set column widths
+            col_widths = [pdf.get_string_width(col) + 6 for col in columns]
+            
+            # Add header
+            for i, col in enumerate(columns):
+                pdf.cell(col_widths[i], 10, txt=col, border=1)
+            pdf.ln()
+            
+            # Add data rows
+            for row in data:
+                for i, col in enumerate(columns):
+                    pdf.cell(col_widths[i], 10, txt=str(row[col]), border=1)
+                pdf.ln()
+        
+        # Save to buffer
+        buffer = BytesIO()
+        pdf.output(buffer)
+        buffer.seek(0)
+        
+        # Return the PDF file
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=reports.pdf"
+            }
+        )
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="PDF export requires fpdf2 package"
+        )
