@@ -23,8 +23,9 @@ from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import text
 import boto3
 from botocore.exceptions import ClientError
-from io import BytesIO
+from io import BytesIO, StringIO
 import pandas as pd
+from fpdf import FPDF
 
 # Backblaze B2 Configuration
 B2_BUCKET_NAME = "uploads-dir"
