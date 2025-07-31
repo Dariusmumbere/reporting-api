@@ -197,7 +197,6 @@ class User(Base):
     attachments = relationship("Attachment", back_populates="uploader")
     sent_messages = relationship("ChatMessage", foreign_keys="ChatMessage.sender_id", back_populates="sender")
     received_messages = relationship("ChatMessage", foreign_keys="ChatMessage.recipient_id", back_populates="recipient")
-    notifications = relationship("Notification", back_populates="user")
 
 class Report(Base):
     __tablename__ = "reports"
@@ -301,21 +300,7 @@ class InvitationLink(Base):
 
     created_by = relationship("User", foreign_keys=[created_by_id])
     organization = relationship("Organization")
-
-class Notification(Base):
-    __tablename__ = "notifications"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    title = Column(String, nullable=False)
-    message = Column(String, nullable=False)
-    is_read = Column(Boolean, default=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    type = Column(String)  # e.g., "report", "message", "system"
-    related_id = Column(Integer)  # ID of related entity (report, message, etc.)
-
-    user = relationship("User", back_populates="notifications")
-
+    
 # Initialize default admin user
 def init_default_admin():
     db = SessionLocal()
@@ -528,20 +513,7 @@ class InvitationResponse(BaseModel):
     class Config:
         orm_mode = True
 
-class NotificationBase(BaseModel):
-    title: str
-    message: str
-    type: Optional[str] = None
-    related_id: Optional[int] = None
-
-class NotificationInDB(NotificationBase):
-    id: int
-    is_read: bool
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-        
+    
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -610,69 +582,35 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[int, WebSocket] = {}
         self.user_status: Dict[int, str] = {}
-        self.notification_subscriptions: Set[int] = set()
 
     async def connect(self, websocket: WebSocket, user_id: int):
         await websocket.accept()
         self.active_connections[user_id] = websocket
         self.user_status[user_id] = "online"
-        self.notification_subscriptions.add(user_id)
         await self.broadcast_user_status(user_id, "online")
 
     def disconnect(self, user_id: int):
         if user_id in self.active_connections:
             del self.active_connections[user_id]
-        if user_id in self.notification_subscriptions:
-            self.notification_subscriptions.remove(user_id)
-        self.user_status[user_id] = "offline"
-        asyncio.create_task(self.broadcast_user_status(user_id, "offline"))
+            self.user_status[user_id] = "offline"
+            asyncio.create_task(self.broadcast_user_status(user_id, "offline"))
 
     async def send_personal_message(self, message: str, user_id: int):
         if user_id in self.active_connections:
-            try:
-                await self.active_connections[user_id].send_text(message)
-            except Exception as e:
-                print(f"Error sending message to user {user_id}: {e}")
-                self.disconnect(user_id)
+            await self.active_connections[user_id].send_text(message)
 
     async def broadcast_user_status(self, user_id: int, status: str):
         for connection in self.active_connections.values():
-            try:
-                await connection.send_text(json.dumps({
-                    "type": "user_status",
-                    "user_id": user_id,
-                    "status": status
-                }))
-            except Exception as e:
-                print(f"Error broadcasting user status: {e}")
-
-    async def broadcast_notification(self, user_id: int, notification: dict):
-        if user_id in self.notification_subscriptions and user_id in self.active_connections:
-            try:
-                await self.active_connections[user_id].send_text(json.dumps({
-                    "type": "new_notification",
-                    "notification": notification
-                }))
-                
-                # Also send updated unread count
-                db = SessionLocal()
-                unread_count = db.query(func.count(Notification.id)).filter(
-                    Notification.user_id == user_id,
-                    Notification.is_read == False
-                ).scalar()
-                db.close()
-                
-                await self.active_connections[user_id].send_text(json.dumps({
-                    "type": "unread_notification_count",
-                    "count": unread_count
-                }))
-            except Exception as e:
-                print(f"Error broadcasting notification: {e}")
+            await connection.send_text(json.dumps({
+                "type": "user_status",
+                "user_id": user_id,
+                "status": status
+            }))
 
 manager = ConnectionManager()
 
 # WebSocket endpoint for chat
-@app.websocket("/ws")
+@app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, token: str = None):
     try:
         # Authenticate user
@@ -706,18 +644,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
             "user_id": user.id
         }))
 
-        # Get initial unread notifications count
-        unread_count = db.query(func.count(Notification.id)).filter(
-            Notification.user_id == user.id,
-            Notification.is_read == False
-        ).scalar()
-        
-        await websocket.send_text(json.dumps({
-            "type": "initial_notification_count",
-            "count": unread_count
-        }))
-
-        # Keep connection alive and handle messages
+        # Keep connection alive
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
@@ -729,7 +656,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                     db_message = ChatMessage(
                         sender_id=user.id,
                         recipient_id=message["recipient_id"],
-                        content=message["content"],  # URL to the audio file
+                        content=message["content"],  # This should be the URL to the audio file
                         timestamp=datetime.utcnow(),
                         status="delivered",
                         message_type="voice"
@@ -748,17 +675,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                 db.add(db_message)
                 db.commit()
                 db.refresh(db_message)
-
-                # Create notification for recipient
-                sender_name = user.name
-                await create_notification(
-                    db,
-                    message["recipient_id"],
-                    "New Message",
-                    f"You received a new message from {sender_name}",
-                    "message",
-                    db_message.id
-                )
 
                 # Prepare response message
                 response_message = {
@@ -798,40 +714,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                 ).update({"status": "read"})
                 db.commit()
 
-            elif message["type"] == "notification_read":
-                # Mark notification as read
-                notification = db.query(Notification).filter(
-                    Notification.id == message["notification_id"],
-                    Notification.user_id == user.id
-                ).first()
-                
-                if notification:
-                    notification.is_read = True
-                    db.commit()
-                    
-                    # Update all clients for this user
-                    await manager.send_personal_message(json.dumps({
-                        "type": "notification_read",
-                        "notification_id": notification.id,
-                        "unread_count": db.query(func.count(Notification.id)).filter(
-                            Notification.user_id == user.id,
-                            Notification.is_read == False
-                        ).scalar()
-                    }), user.id)
-
-            elif message["type"] == "subscribe_notifications":
-                # Client is subscribing to notification updates
-                # This is handled by the connection manager
-                pass
-
-            elif message["type"] == "typing_indicator":
-                # Forward typing indicator to recipient
-                await manager.send_personal_message(json.dumps({
-                    "type": "typing_indicator",
-                    "sender_id": user.id,
-                    "is_typing": message["is_typing"]
-                }), message["recipient_id"])
-
     except WebSocketDisconnect:
         manager.disconnect(user.id)
     except Exception as e:
@@ -839,6 +721,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
         manager.disconnect(user.id)
     finally:
         db.close()
+
 # Auth routes
 @app.post("/auth/login", response_model=Token)
 async def login_for_access_token(
@@ -2746,99 +2629,3 @@ async def send_password_reset_email(email: str, reset_token: str):
     except Exception as e:
         print(f"Error sending password reset email: {e}")
         return False
-@app.get("/notifications", response_model=List[NotificationInDB])
-async def get_user_notifications(
-    skip: int = 0,
-    limit: int = 10,
-    unread_only: bool = False,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    """Get notifications for the current user with RBAC"""
-    query = db.query(Notification).filter(
-        Notification.user_id == current_user.id
-    )
-    
-    if unread_only:
-        query = query.filter(Notification.is_read == False)
-    
-    notifications = query.order_by(
-        Notification.created_at.desc()
-    ).offset(skip).limit(limit).all()
-    
-    return notifications
-
-@app.get("/notifications/unread-count", response_model=dict)
-async def get_unread_notification_count(
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    """Get count of unread notifications for the current user"""
-    count = db.query(func.count(Notification.id)).filter(
-        Notification.user_id == current_user.id,
-        Notification.is_read == False
-    ).scalar()
-    
-    return {"count": count}
-
-@app.patch("/notifications/{notification_id}/read", response_model=NotificationInDB)
-async def mark_notification_as_read(
-    notification_id: int,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    """Mark a notification as read (with ownership check)"""
-    notification = db.query(Notification).filter(
-        Notification.id == notification_id,
-        Notification.user_id == current_user.id
-    ).first()
-    
-    if not notification:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    
-    notification.is_read = True
-    db.commit()
-    db.refresh(notification)
-    
-    return notification
-
-async def create_notification(
-    db: Session,
-    user_id: int,
-    title: str,
-    message: str,
-    notification_type: str = None,
-    related_id: int = None
-):
-    """Helper function to create a notification"""
-    notification = Notification(
-        user_id=user_id,
-        title=title,
-        message=message,
-        type=notification_type,
-        related_id=related_id
-    )
-    
-    db.add(notification)
-    db.commit()
-    db.refresh(notification)
-    
-    # Notify via WebSocket if user is online
-    await manager.send_personal_message(
-        json.dumps({
-            "type": "new_notification",
-            "notification": {
-                "id": notification.id,
-                "title": notification.title,
-                "message": notification.message,
-                "is_read": notification.is_read,
-                "created_at": notification.created_at.isoformat(),
-                "type": notification.type,
-                "related_id": notification.related_id
-            }
-        }),
-        user_id
-    )
-    
-    return notification
-        
