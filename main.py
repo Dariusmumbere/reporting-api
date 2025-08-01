@@ -1594,6 +1594,7 @@ async def create_report(
         except Exception as e:
             print(f"Error processing attachment: {e}")
             continue
+        await create_report_notification(db, db_report, "created", current_user)
     
     db.commit()
     
@@ -1606,8 +1607,11 @@ async def create_report(
         report_data["organization_name"] = "No Organization"
     report_data["attachments"] = saved_attachments
     report_data["template_fields"] = template_data
+
+    
     
     return ReportInDB(**report_data)
+    
 @app.get("/reports", response_model=List[ReportInDB])
 async def read_reports(
     skip: int = 0,
@@ -1828,7 +1832,7 @@ async def update_report_status(
     # Update status and comments
     report.status = status_update.status
     report.admin_comments = status_update.admin_comments
-    
+    await create_report_notification(db, report, "status_changed", current_user)
     db.commit()
     db.refresh(report)
     
@@ -1851,7 +1855,6 @@ async def update_report_status(
             "url": a.url
         } for a in attachments
     ]
-    
     return ReportInDB(**report_data)
 
 @app.get("/auth/first-user")
@@ -2799,67 +2802,6 @@ async def get_profile_picture(
             status_code=500,
             detail=str(e)
         )
-# Notification endpoints
-@app.get("/notifications", response_model=List[NotificationInDB])
-async def get_user_notifications(
-    skip: int = 0,
-    limit: int = 10,
-    unread_only: bool = False,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    query = db.query(Notification).filter(
-        Notification.user_id == current_user.id
-    ).order_by(
-        Notification.created_at.desc()
-    )
-    
-    if unread_only:
-        query = query.filter(Notification.is_read == False)
-    
-    notifications = query.offset(skip).limit(limit).all()
-    return notifications
-
-@app.get("/notifications/unread-count", response_model=int)
-async def get_unread_notification_count(
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    count = db.query(func.count(Notification.id)).filter(
-        Notification.user_id == current_user.id,
-        Notification.is_read == False
-    ).scalar()
-    return count or 0
-
-@app.post("/notifications/{notification_id}/mark-read")
-async def mark_notification_as_read(
-    notification_id: int,
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    notification = db.query(Notification).filter(
-        Notification.id == notification_id,
-        Notification.user_id == current_user.id
-    ).first()
-    
-    if not notification:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    
-    notification.is_read = True
-    db.commit()
-    return {"message": "Notification marked as read"}
-
-@app.post("/notifications/mark-all-read")
-async def mark_all_notifications_as_read(
-    db: Session = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    db.query(Notification).filter(
-        Notification.user_id == current_user.id,
-        Notification.is_read == False
-    ).update({"is_read": True})
-    db.commit()
-    return {"message": "All notifications marked as read"}
 
 @app.get("/export/reports")
 async def export_reports(
@@ -3056,3 +2998,96 @@ async def get_raw_reports(db: Session = Depends(get_db)):
         return result
     
     return JSONResponse(content=[serialize_report(r) for r in reports])
+    
+@app.get("/notifications", response_model=List[NotificationInDB])
+async def get_notifications(
+    skip: int = 0,
+    limit: int = 10,
+    unread_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    query = db.query(Notification).filter(
+        Notification.user_id == current_user.id
+    ).order_by(
+        Notification.created_at.desc()
+    )
+    
+    if unread_only:
+        query = query.filter(Notification.is_read == False)
+    
+    notifications = query.offset(skip).limit(limit).all()
+    return notifications
+
+@app.patch("/notifications/{notification_id}/read")
+async def mark_notification_as_read(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == current_user.id
+    ).first()
+    
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    
+    notification.is_read = True
+    db.commit()
+    
+    return {"message": "Notification marked as read"}
+async def create_report_notification(
+    db: Session,
+    report: Report,
+    action: str,  # "created", "status_changed"
+    current_user: UserInDB
+):
+    # Determine who should receive the notification
+    recipients = []
+    
+    if action == "created":
+        # Notify organization admins when a new report is created
+        recipients = db.query(User).filter(
+            User.organization_id == report.organization_id,
+            User.role == "admin",
+            User.id != current_user.id  # Don't notify the creator
+        ).all()
+        
+        title = "New Report Submitted"
+        message = f"A new report '{report.title}' has been submitted by {current_user.name}"
+        link = f"/reports/{report.id}"
+    elif action == "status_changed":
+        # Notify the report author when status changes
+        if report.author_id != current_user.id:  # Don't notify if the user changed their own report status
+            recipients = [report.author]
+            
+            title = "Report Status Updated"
+            message = f"Your report '{report.title}' status has been updated to {report.status}"
+            link = f"/reports/{report.id}"
+    
+    # Create notifications for each recipient
+    for recipient in recipients:
+        notification = Notification(
+            user_id=recipient.id,
+            title=title,
+            message=message,
+            is_read=False,
+            link=link
+        )
+        db.add(notification)
+    
+    db.commit()
+
+@app.post("/notifications/mark-all-read")
+async def mark_all_notifications_as_read(
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read == False
+    ).update({"is_read": True})
+    db.commit()
+    
+    return {"message": "All notifications marked as read"}
