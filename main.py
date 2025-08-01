@@ -3042,4 +3042,17 @@ async def export_reports(
 async def get_raw_reports(db: Session = Depends(get_db)):
     """Development-only endpoint to get raw report data"""
     reports = db.query(Report).all()
-    return JSONResponse(content=[{k:v for k,v in r.__dict__.items() if not k.startswith('_')} for r in reports])
+    
+    def serialize_report(report):
+        result = {}
+        for k, v in report.__dict__.items():
+            if k.startswith('_'):
+                continue
+            # Handle datetime serialization
+            if isinstance(v, datetime):
+                result[k] = v.isoformat()
+            else:
+                result[k] = v
+        return result
+    
+    return JSONResponse(content=[serialize_report(r) for r in reports])
