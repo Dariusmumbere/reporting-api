@@ -356,9 +356,45 @@ def init_default_admin():
     finally:
         db.close()
 
+def reset_database():
+    # Get a new database session
+    db = SessionLocal()
+    
+    try:
+        # Disable foreign key checks (PostgreSQL specific)
+        db.execute(text("SET session_replication_role = 'replica';"))
+        
+        # Get all table names
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        # Drop all tables with CASCADE
+        for table in tables:
+            db.execute(text(f'DROP TABLE IF EXISTS "{table}" CASCADE;'))
+        
+        # Re-enable foreign key checks
+        db.execute(text("SET session_replication_role = 'origin';"))
+        
+        # Commit the transaction
+        db.commit()
+        
+        # Recreate all tables
+        Base.metadata.create_all(bind=engine)
+        
+        # Reinitialize default admin user
+        init_default_admin()
+        
+        print("Database reset successfully")
+    except Exception as e:
+        db.rollback()
+        print(f"Error resetting database: {e}")
+        raise
+    finally:
+        db.close()
+
         
 # Reset database and initialize data
-init_default_admin()
+reset_database()
 
 # Pydantic models (remain the same as before)
 class Token(BaseModel):
@@ -597,7 +633,6 @@ async def is_org_admin_or_super_admin(current_user: UserInDB = Depends(get_curre
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
     
-Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
 
 # Initialize FastAPI app
