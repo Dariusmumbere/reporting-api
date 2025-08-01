@@ -173,6 +173,7 @@ async def delete_from_b2(url: str):
         print(f"Error deleting from B2: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete file")
 
+
 # Models (remain the same as before)
 class Organization(Base):
     __tablename__ = "organizations"
@@ -358,6 +359,8 @@ def init_default_admin():
         
 # Reset database and initialize data
 init_default_admin()
+Base.metadata.drop_all(bind=engine, tables=[Report.__table__])
+Base.metadata.create_all(bind=engine, tables=[Report.__table__])
 
 # Pydantic models (remain the same as before)
 class Token(BaseModel):
