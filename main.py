@@ -359,8 +359,6 @@ def init_default_admin():
         
 # Reset database and initialize data
 init_default_admin()
-Base.metadata.drop_all(bind=engine, tables=[Report.__table__])
-Base.metadata.create_all(bind=engine, tables=[Report.__table__])
 
 # Pydantic models (remain the same as before)
 class Token(BaseModel):
