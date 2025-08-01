@@ -361,19 +361,19 @@ def add_profile_picture_column():
     try:
         # Check if the column already exists
         inspector = inspect(db.get_bind())
-        columns = inspector.get_columns('users')
+        columns = inspector.get_columns('reports')
         column_names = [column['name'] for column in columns]
         
-        if 'profile_picture' not in column_names:
+        if 'template_id' not in column_names:
             # Add the column
-            db.execute(text("ALTER TABLE users ADD COLUMN profile_picture VARCHAR"))
+            db.execute(text("ALTER TABLE reports ADD COLUMN template_id VARCHAR"))
             db.commit()
-            print("Added profile_picture column to users table")
+            print("Added template id column to reports table")
         else:
-            print("profile_picture column already exists")
+            print("column already exists")
     except Exception as e:
         db.rollback()
-        print(f"Error adding profile_picture column: {e}")
+        print(f"Error add column: {e}")
     finally:
         db.close()
 
