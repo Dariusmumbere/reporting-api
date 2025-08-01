@@ -16,3 +16,4 @@ botocore
 pandas
 xlsxwriter 
 fpdf2
+beautifulsoup4
