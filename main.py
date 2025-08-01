@@ -2893,10 +2893,9 @@ async def mark_all_notifications_as_read(
     ).update({"is_read": True})
     db.commit()
     return {"message": "All notifications marked as read"}
-    
+
 @app.get("/export/reports")
 async def export_reports(
-    template_id: int = Query(None, description="Template ID to filter by"),
     date_range: str = Query("all", description="Date range filter"),
     start_date: str = Query(None, description="Start date for custom range"),
     end_date: str = Query(None, description="End date for custom range"),
@@ -2912,10 +2911,6 @@ async def export_reports(
         # Apply organization filter (unless super admin)
         if current_user.role != "super_admin":
             query = query.filter(Report.organization_id == current_user.organization_id)
-        
-        # Apply template filter if specified
-        if template_id:
-            query = query.filter(Report.template_id == template_id)
         
         # Apply status filter
         if status != "all":
