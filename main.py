@@ -596,7 +596,8 @@ async def is_org_admin_or_super_admin(current_user: UserInDB = Depends(get_curre
     if current_user.role not in ["admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
-
+    
+Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
 
 # Initialize FastAPI app
