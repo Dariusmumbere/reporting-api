@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Query, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, date
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
-import re
 import uuid
 import json
 import asyncio
@@ -29,24 +28,8 @@ from io import BytesIO, StringIO
 import pandas as pd
 from fpdf import FPDF
 import logging
-import csv
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
+from bs4 import BeautifulSoup
 
-router = APIRouter()
-
-def clean_html(raw_html: Optional[str]) -> str:
-    """Strip HTML tags from text content"""
-    if not raw_html:
-        return ""
-    
-    # Remove HTML tags
-    clean_text = re.sub(r'<[^>]+>', '', raw_html)
-    # Replace common HTML entities
-    clean_text = clean_text.replace('&nbsp;', ' ').replace('&amp;', '&')
-    return clean_text.strip()
 logger = logging.getLogger(__name__)
 
 # Backblaze B2 Configuration
@@ -2878,14 +2861,13 @@ async def mark_all_notifications_as_read(
     db.commit()
     return {"message": "All notifications marked as read"}
 
-@router.get("/export/reports")
+@app.get("/export/reports")
 async def export_reports(
-    date_range: str = Query("all", description="Date range filter (all, today, week, month, quarter, year, custom)"),
-    start_date: Optional[str] = Query(None, description="Start date for custom range (YYYY-MM-DD)"),
-    end_date: Optional[str] = Query(None, description="End date for custom range (YYYY-MM-DD)"),
+    date_range: str = Query("all", description="Date range filter"),
+    start_date: str = Query(None, description="Start date for custom range"),
+    end_date: str = Query(None, description="End date for custom range"),
     status: str = Query("all", description="Status filter"),
-    format: str = Query("excel", description="Export format (excel, csv, json, pdf)"),
-    template_id: Optional[str] = Query(None, description="Specific template ID to filter by"),
+    format: str = Query("excel", description="Export format"),
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
@@ -2896,10 +2878,6 @@ async def export_reports(
         # Apply organization filter (unless super admin)
         if current_user.role != "super_admin":
             query = query.filter(Report.organization_id == current_user.organization_id)
-        
-        # Apply template filter if specified
-        if template_id:
-            query = query.filter(Report.template_id == template_id)
         
         # Apply status filter
         if status != "all":
@@ -2940,27 +2918,26 @@ async def export_reports(
         if not reports:
             raise HTTPException(status_code=404, detail="No reports found matching criteria")
         
-        # Prepare clean data for export
+        # Prepare data for export
         export_data = []
         for report in reports:
             report_data = {
-                "ID": report.id,
-                "Title": report.title,
-                "Description": clean_html(report.description),
-                "Category": report.category,
-                "Status": report.status,
-                "Author": report.author.name if report.author else "Unknown",
-                "Created At": report.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "Updated At": report.updated_at.strftime("%Y-%m-%d %H:%M:%S") if report.updated_at else None,
-                "Organization": report.organization.name if report.organization else None
+                "id": report.id,
+                "title": report.title,
+                "description": BeautifulSoup(report.description or "", "html.parser").get_text(),
+                "category": report.category,
+                "status": report.status,
+                "author": report.author.name,
+                "created_at": report.created_at.isoformat(),
+                "updated_at": report.updated_at.isoformat() if report.updated_at else None
             }
             
             # Include template fields if available
             if report.template_data:
                 for field_name, field_value in report.template_data.items():
-                    # Clean HTML from template fields too if they're strings
-                    clean_value = clean_html(field_value) if isinstance(field_value, str) else field_value
-                    report_data[field_name] = clean_value
+                    if isinstance(field_value, str):
+                        field_value = BeautifulSoup(field_value, "html.parser").get_text()
+                    report_data[field_name] = field_value
             
             export_data.append(report_data)
         
@@ -2969,6 +2946,10 @@ async def export_reports(
             return JSONResponse(content=export_data)
         
         elif format == "csv":
+            import csv
+            from io import StringIO
+            
+            # Create CSV string
             output = StringIO()
             writer = csv.DictWriter(output, fieldnames=export_data[0].keys())
             writer.writeheader()
@@ -2977,39 +2958,33 @@ async def export_reports(
             return StreamingResponse(
                 iter([output.getvalue()]),
                 media_type="text/csv",
-                headers={
-                    "Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.csv",
-                    "Access-Control-Expose-Headers": "Content-Disposition"
-                }
+                headers={"Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.csv"}
             )
         
         elif format == "excel":
-            df = pd.DataFrame(export_data)
+            import pandas as pd
+            from io import BytesIO
             
-            # Auto-adjust column widths
-            with BytesIO() as output:
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Reports')
-                    worksheet = writer.sheets['Reports']
-                    
-                    # Set column widths based on content
-                    for idx, col in enumerate(df.columns):
-                        max_len = max(
-                            df[col].astype(str).map(len).max(),  # Content length
-                            len(str(col))  # Header length
-                        )
-                        worksheet.set_column(idx, idx, min(max_len + 2, 50))  # Cap at 50 chars
-                
-                return StreamingResponse(
-                    BytesIO(output.getvalue()),
-                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    headers={
-                        "Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.xlsx",
-                        "Access-Control-Expose-Headers": "Content-Disposition"
-                    }
-                )
+            # Create Excel file
+            df = pd.DataFrame(export_data)
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Reports')
+            
+            return StreamingResponse(
+                BytesIO(output.getvalue()),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.xlsx"}
+            )
         
         elif format == "pdf":
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+            from io import BytesIO
+            
+            # Create PDF
             buffer = BytesIO()
             doc = SimpleDocTemplate(buffer, pagesize=letter)
             styles = getSampleStyleSheet()
@@ -3017,31 +2992,34 @@ async def export_reports(
             
             # Add title
             elements.append(Paragraph("Reports Export", styles['Title']))
-            elements.append(Paragraph(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
             
+            # Prepare data for table
             if not export_data:
                 elements.append(Paragraph("No reports found", styles['BodyText']))
             else:
-                # Create table data
-                headers = list(export_data[0].keys())
-                table_data = [headers]
+                # Get all possible keys from the data
+                all_keys = set()
+                for report in export_data:
+                    all_keys.update(report.keys())
+                headers = sorted(all_keys)
                 
+                # Create table data
+                table_data = [headers]
                 for report in export_data:
                     row = [str(report.get(header, "")) for header in headers]
                     table_data.append(row)
                 
-                # Create table with improved styling
-                t = Table(table_data, repeatRows=1)
+                # Create table
+                t = Table(table_data)
                 t.setStyle(TableStyle([
-                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#4472C4')),
+                    ('BACKGROUND', (0,0), (-1,0), colors.grey),
                     ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
                     ('ALIGN', (0,0), (-1,-1), 'LEFT'),
                     ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                     ('FONTSIZE', (0,0), (-1,0), 10),
                     ('BOTTOMPADDING', (0,0), (-1,0), 12),
-                    ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#D9E1F2')),
-                    ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#B4C6E7')),
-                    ('WORDWRAP', (0,0), (-1,-1), True)
+                    ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+                    ('GRID', (0,0), (-1,-1), 1, colors.black)
                 ]))
                 elements.append(t)
             
@@ -3051,19 +3029,14 @@ async def export_reports(
             return StreamingResponse(
                 buffer,
                 media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.pdf",
-                    "Access-Control-Expose-Headers": "Content-Disposition"
-                }
+                headers={"Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.pdf"}
             )
         
         else:
-            raise HTTPException(status_code=400, detail="Invalid export format. Supported formats: excel, csv, json, pdf")
+            raise HTTPException(status_code=400, detail="Invalid export format")
             
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
         
 @app.get("/admin/reports-raw")
 async def get_raw_reports(db: Session = Depends(get_db)):
