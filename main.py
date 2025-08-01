@@ -355,46 +355,6 @@ def init_default_admin():
     finally:
         db.close()
 
-# Add this as a one-time migration script
-def add_profile_picture_column():
-    db = SessionLocal()
-    try:
-        # Check if the column exists and its current type
-        inspector = inspect(db.get_bind())
-        columns = inspector.get_columns('reports')
-        column_exists = any(col['name'] == 'template_id' for col in columns)
-        
-        if column_exists:
-            # Check if it's already the correct type
-            template_id_col = next(col for col in columns if col['name'] == 'template_id')
-            if isinstance(template_id_col['type'], Integer):
-                print("template_id column already exists with correct INTEGER type")
-                return
-            
-            # Drop the existing column (and its constraints if any)
-            print("Dropping existing template_id column to recreate as INTEGER")
-            db.execute(text("ALTER TABLE reports DROP COLUMN IF EXISTS template_id"))
-            db.commit()
-        
-        # Create the column with proper INTEGER type and foreign key constraint
-        print("Creating template_id column as INTEGER with foreign key constraint")
-        db.execute(text("""
-            ALTER TABLE reports 
-            ADD COLUMN template_id INTEGER 
-            REFERENCES report_templates(id)
-            ON DELETE SET NULL
-        """))
-        db.commit()
-        print("Successfully created template_id column with proper type and constraints")
-        
-    except Exception as e:
-        db.rollback()
-        print(f"Error modifying template_id column: {e}")
-        raise
-    finally:
-        db.close()
-# Run the migration
-add_profile_picture_column()
         
 # Reset database and initialize data
 init_default_admin()
