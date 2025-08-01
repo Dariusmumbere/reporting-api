@@ -3037,3 +3037,9 @@ async def export_reports(
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+        
+@app.get("/admin/reports-raw")
+async def get_raw_reports(db: Session = Depends(get_db)):
+    """Development-only endpoint to get raw report data"""
+    reports = db.query(Report).all()
+    return JSONResponse(content=[{k:v for k,v in r.__dict__.items() if not k.startswith('_')} for r in reports])
