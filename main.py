@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Query
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Query, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -2025,9 +2025,11 @@ async def download_file(file_name: str):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+        
 @app.post("/templates", response_model=ReportTemplateInDB)
 async def create_template(
     template: ReportTemplateCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
@@ -2074,7 +2076,36 @@ async def create_template(
     db.commit()
     db.refresh(db_template)
     
+    # Notify all users in the organization about the new template
+    background_tasks.add_task(notify_users_about_new_template, db, db_template, current_user)
+    
     return db_template
+
+async def notify_users_about_new_template(db: Session, template: ReportTemplate, creator: User):
+    """Create notifications for all users about a new template"""
+    try:
+        # Get all users in the organization (except the creator)
+        users = db.query(User).filter(
+            User.organization_id == template.organization_id,
+            User.id != creator.id
+        ).all()
+        
+        # Create a notification for each user
+        for user in users:
+            notification = Notification(
+                user_id=user.id,
+                title="New Report Template Available",
+                message=f"A new report template '{template.name}' has been created by {creator.name}",
+                is_read=False,
+                link=f"/templates/{template.id}"
+            )
+            db.add(notification)
+        
+        db.commit()
+    except Exception as e:
+        # Log the error but don't fail the template creation
+        logger.error(f"Failed to create template notifications: {e}")
+        db.rollback()
 
 @app.get("/templates", response_model=List[ReportTemplateInDB])
 async def get_templates(
