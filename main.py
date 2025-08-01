@@ -221,6 +221,7 @@ class Report(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     template_data = Column(JSON, nullable=True)  # Add this line
+    template_id = Column(Integer, ForeignKey("report_templates.id"), nullable=True)
 
     author = relationship("User", back_populates="reports")
     organization = relationship("Organization", back_populates="reports")
