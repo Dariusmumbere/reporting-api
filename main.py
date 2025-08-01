@@ -361,22 +361,18 @@ def reset_database():
     db = SessionLocal()
     
     try:
-        # Disable foreign key checks (PostgreSQL specific)
-        db.execute(text("SET session_replication_role = 'replica';"))
-        
         # Get all table names
         inspector = inspect(engine)
         tables = inspector.get_table_names()
         
         # Drop all tables with CASCADE
         for table in tables:
-            db.execute(text(f'DROP TABLE IF EXISTS "{table}" CASCADE;'))
-        
-        # Re-enable foreign key checks
-        db.execute(text("SET session_replication_role = 'origin';"))
-        
-        # Commit the transaction
-        db.commit()
+            try:
+                db.execute(text(f'DROP TABLE IF EXISTS "{table}" CASCADE;'))
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                print(f"Error dropping table {table}: {e}")
         
         # Recreate all tables
         Base.metadata.create_all(bind=engine)
@@ -391,7 +387,6 @@ def reset_database():
         raise
     finally:
         db.close()
-
         
 # Reset database and initialize data
 reset_database()
