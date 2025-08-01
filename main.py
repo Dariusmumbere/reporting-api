@@ -1594,7 +1594,9 @@ async def create_report(
         except Exception as e:
             print(f"Error processing attachment: {e}")
             continue
-        await create_report_notification(db, db_report, "created", current_user)
+    
+    # Trigger notification after report is created and attachments are processed
+    await create_report_notification(db, db_report, "created", current_user)
     
     db.commit()
     
@@ -1608,8 +1610,6 @@ async def create_report(
     report_data["attachments"] = saved_attachments
     report_data["template_fields"] = template_data
 
-    
-    
     return ReportInDB(**report_data)
     
 @app.get("/reports", response_model=List[ReportInDB])
