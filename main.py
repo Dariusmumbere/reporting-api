@@ -446,6 +446,7 @@ class ReportBase(BaseModel):
     title: str
     description: str
     category: str
+    template_id: Optional[int]
 
 class ReportCreate(ReportBase):
     pass
@@ -541,6 +542,7 @@ class ReportTemplateBase(BaseModel):
     name: str
     description: Optional[str] = None
     category: Optional[str] = None
+    
 
 class ReportTemplateCreate(ReportTemplateBase):
     fields: List[TemplateFieldCreate] = []
