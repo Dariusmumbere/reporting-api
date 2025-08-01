@@ -365,11 +365,12 @@ def add_profile_picture_column():
         column_names = [column['name'] for column in columns]
         
         if 'template_id' not in column_names:
-            # Add the column
-            db.execute(text("ALTER TABLE reports ADD COLUMN template_id VARCHAR"))
+            # Change this to create as INTEGER
+            db.execute(text("ALTER TABLE reports ADD COLUMN template_id INTEGER"))
             db.commit()
             print("Added template id column to reports table")
         else:
+            # If it exists as VARCHAR, you might need to alter it
             print("column already exists")
     except Exception as e:
         db.rollback()
