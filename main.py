@@ -1559,6 +1559,7 @@ async def create_report(
     title: str = Form(...),
     description: str = Form(...),
     category: str = Form(...),
+    template_id: Optional[int] = Form(None),
     template_fields: Optional[str] = Form(None),
     attachments: List[UploadFile] = File([]),
     db: Session = Depends(get_db),
@@ -1589,6 +1590,7 @@ async def create_report(
         category=category,
         author_id=current_user.id,
         organization_id=current_user.organization_id if current_user.role != "super_admin" else None,
+        template_id=template_id,
         template_data=template_data  # Store the template fields data
     )
     
