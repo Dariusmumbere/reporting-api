@@ -181,7 +181,8 @@ class Organization(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
-    logo_url = Column(String, nullable=True)
+    logo_data = Column(LargeBinary, nullable=True) 
+    logo_content_type = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     templates = relationship("ReportTemplate", back_populates="organization")
 
@@ -455,7 +456,7 @@ class OrganizationCreate(BaseModel):
 class OrganizationInDB(BaseModel):
     id: int
     name: str
-    logo_url: Optional[str] = None
+    logo_url: Optional[str] = None 
     created_at: datetime
     user_count: int
     report_count: int
@@ -1925,25 +1926,10 @@ async def get_organization_details(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     
-    # Generate signed URL for the logo if it exists
+    # Generate data URL if logo exists
     logo_url = None
-    if org.logo_url:
-        try:
-            # Extract the object key from the URL
-            object_key = org.logo_url.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
-            
-            # Generate a signed URL that's valid for 1 hour
-            logo_url = b2_client.generate_presigned_url(
-                'get_object',
-                Params={
-                    'Bucket': B2_BUCKET_NAME,
-                    'Key': object_key
-                },
-                ExpiresIn=3600
-            )
-        except Exception as e:
-            logger.error(f"Error generating signed URL for logo: {e}")
-            logo_url = None
+    if org.logo_data:
+        logo_url = f"data:{org.logo_content_type};base64,{base64.b64encode(org.logo_data).decode('utf-8')}"
     
     # Get user and report counts
     user_count = db.query(func.count(User.id)).filter(
@@ -1957,11 +1943,13 @@ async def get_organization_details(
     return OrganizationInDB(
         id=org.id,
         name=org.name,
-        logo_url=logo_url,  # Return the signed URL instead of the direct URL
+        logo_url=logo_url,
+        logo_content_type=org.logo_content_type,
         created_at=org.created_at,
         user_count=user_count,
         report_count=report_count
     )
+
 @app.patch("/organization")
 async def update_organization(
     name: Optional[str] = Form(None),
@@ -2000,22 +1988,30 @@ async def update_organization(
     # Handle logo upload if provided
     if logo is not None:
         try:
-            # Upload new logo to B2
-            file_url = await upload_to_b2(logo, "organization_logos")
+            # Read the file content
+            logo_data = await logo.read()
             
-            # Delete old logo if it exists
-            if org.logo_url:
-                try:
-                    await delete_from_b2(org.logo_url)
-                except Exception as e:
-                    print(f"Error deleting old logo from B2: {e}")
+            # Validate it's an image (basic check)
+            if not logo.content_type.startswith('image/'):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Only image files are allowed for logos"
+                )
             
-            org.logo_url = file_url
+            # Check file size (e.g., limit to 2MB)
+            if len(logo_data) > 2 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Logo file size must be less than 2MB"
+                )
+            
+            org.logo_data = logo_data
+            org.logo_content_type = logo.content_type
             updated = True
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Failed to upload logo: {str(e)}"
+                detail=f"Failed to process logo: {str(e)}"
             )
     
     if updated:
