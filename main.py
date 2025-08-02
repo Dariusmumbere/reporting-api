@@ -357,7 +357,30 @@ def init_default_admin():
         raise e
     finally:
         db.close()
-
+def add_column():
+    """Add missing columns to existing tables if they don't exist"""
+    db = SessionLocal()
+    try:
+        inspector = inspect(db.get_bind())
+        
+        # Check if logo_data column exists in organizations table
+        org_columns = [col['name'] for col in inspector.get_columns('organizations')]
+        if 'logo_data' not in org_columns:
+            db.execute(text("ALTER TABLE organizations ADD COLUMN logo_data BYTEA"))
+        
+        # Check if logo_content_type column exists in organizations table
+        if 'logo_content_type' not in org_columns:
+            db.execute(text("ALTER TABLE organizations ADD COLUMN logo_content_type VARCHAR"))
+        
+        db.commit()
+        print("Successfully added missing columns")
+    except Exception as e:
+        db.rollback()
+        print(f"Error adding columns: {e}")
+        raise
+    finally:
+        db.close()
+add_column()
 
 # Pydantic models (remain the same as before)
 class Token(BaseModel):
