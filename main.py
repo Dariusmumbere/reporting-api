@@ -1925,6 +1925,26 @@ async def get_organization_details(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     
+    # Generate signed URL for the logo if it exists
+    logo_url = None
+    if org.logo_url:
+        try:
+            # Extract the object key from the URL
+            object_key = org.logo_url.replace(f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", "")
+            
+            # Generate a signed URL that's valid for 1 hour
+            logo_url = b2_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': B2_BUCKET_NAME,
+                    'Key': object_key
+                },
+                ExpiresIn=3600
+            )
+        except Exception as e:
+            logger.error(f"Error generating signed URL for logo: {e}")
+            logo_url = None
+    
     # Get user and report counts
     user_count = db.query(func.count(User.id)).filter(
         User.organization_id == org.id
@@ -1937,12 +1957,11 @@ async def get_organization_details(
     return OrganizationInDB(
         id=org.id,
         name=org.name,
-        logo_url=org.logo_url,
+        logo_url=logo_url,  # Return the signed URL instead of the direct URL
         created_at=org.created_at,
         user_count=user_count,
         report_count=report_count
     )
-
 @app.patch("/organization")
 async def update_organization(
     name: Optional[str] = Form(None),
