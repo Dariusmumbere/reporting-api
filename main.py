@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import text
 import boto3
 import io
+import base64
 from botocore.exceptions import ClientError
 from io import BytesIO, StringIO
 import pandas as pd
