@@ -2786,7 +2786,7 @@ async def get_profile_picture(
     user_id: int,
     db: Session = Depends(get_db)
 ):
-    # 1. Get user from database
+    """Get a user's profile picture URL"""
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.profile_picture:
         raise HTTPException(
@@ -2794,46 +2794,9 @@ async def get_profile_picture(
             detail="Profile picture not found"
         )
 
-    try:
-        # 2. Extract object key from URL
-        if B2_ENDPOINT_URL in user.profile_picture:
-            object_key = user.profile_picture.replace(
-                f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/", 
-                ""
-            )
-        else:
-            # Handle case where URL might be just the key
-            object_key = user.profile_picture
-
-        # 3. Generate presigned URL (valid for 1 hour)
-        presigned_url = b2_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': B2_BUCKET_NAME,
-                'Key': object_key
-            },
-            ExpiresIn=3600
-        )
-        
-        # 4. Redirect to the presigned URL
-        return RedirectResponse(url=presigned_url)
-
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'NoSuchKey':
-            raise HTTPException(
-                status_code=410, 
-                detail="Profile picture file missing in storage"
-            )
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to generate access URL"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
+    # Just return the URL - let the client handle the actual image fetch
+    return {"url": user.profile_picture}
+    
 @app.get("/export/reports")
 async def export_reports(
     date_range: str = Query("all", description="Date range filter"),
