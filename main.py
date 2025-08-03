@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, Query, BackgroundTasks, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +29,7 @@ from io import BytesIO, StringIO
 import pandas as pd
 from fpdf import FPDF
 import logging
+import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,8 @@ b2_client = boto3.client(
     aws_access_key_id=B2_KEY_ID,
     aws_secret_access_key=B2_APPLICATION_KEY
 )
+GEMINI_API_KEY = "AIzaSyAfGhtKkofAFP9NZqOB0MR3Fr0fUZYfiT0"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
 
 # Database configuration
 DATABASE_URL = "postgresql://reporting_wlcd_user:sYC2WmtyjDCjyxvCPjoRNYAH4OCpVp6L@dpg-d1p23rc9c44c738581ig-a/reporting_wlcd"
@@ -384,6 +387,10 @@ def add_column():
 add_column()
 
 # Pydantic models (remain the same as before)
+class ChatbotMessage(BaseModel):
+    message: str
+    context: Optional[str] = None 
+    
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -3032,3 +3039,45 @@ async def mark_all_notifications_as_read(
     db.commit()
     
     return {"message": "All notifications marked as read"}
+@app.post("/chatbot/ask", response_model=Dict[str, str])
+async def ask_chatbot(
+    message: ChatbotMessage,
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Endpoint to interact with the Gemini chatbot
+    """
+    try:
+        # Prepare the prompt with context if available
+        prompt = message.message
+        if message.context:
+            prompt = f"Context: {message.context}\n\nQuestion: {message.message}"
+
+        # Call Gemini API
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
+            json={
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }]
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+
+        # Extract the response text
+        result = response.json()
+        if 'candidates' in result and result['candidates']:
+            answer = result['candidates'][0]['content']['parts'][0]['text']
+            return {"response": answer}
+        else:
+            return {"response": "I couldn't generate a response. Please try again."}
+
+    except Exception as e:
+        logger.error(f"Error calling Gemini API: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get response from chatbot"
+        )
