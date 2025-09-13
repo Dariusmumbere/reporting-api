@@ -69,7 +69,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 SMTP_USERNAME = "dariusmumbere@gmail.com"
-SMTP_PASSWORD = "qsvx xbnd qymq msda"
+SMTP_PASSWORD = "ofoc xxhb rqol jzml"
 EMAIL_FROM = "ReportHub <noreply@reporthub.com>"
 OTP_EXPIRATION_MINUTES = 10
 
