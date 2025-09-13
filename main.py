@@ -40,15 +40,6 @@ B2_ENDPOINT_URL = "https://s3.us-east-005.backblazeb2.com"
 B2_KEY_ID = "0055ca7845641d30000000002"
 B2_APPLICATION_KEY = "K005NNeGM9r28ujQ3jvNEQy2zUiu0TI"
 
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://dariusmumbere.github.io/reporting"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Initialize B2 client
 b2_client = boto3.client(
     's3',
@@ -623,6 +614,14 @@ app = FastAPI(
     title="ReportHub API",
     description="A professional reporting system with user authentication and document attachments",
     version="1.0.0"
+)
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://dariusmumbere.github.io/reporting"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # WebSocket Connection Manager
