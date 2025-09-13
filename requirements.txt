@@ -17,3 +17,4 @@ pandas
 xlsxwriter 
 fpdf2
 beautifulsoup4
+requests
