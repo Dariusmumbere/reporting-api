@@ -3057,3 +3057,10 @@ async def ask_chatbot(
             status_code=500,
             detail="Failed to get response from chatbot"
         )
+@app.options("/notifications")
+async def options_notifications():
+    return {"message": "OK"}
+
+@app.options("/auth/send-verification-email")
+async def options_send_verification_email():
+    return {"message": "OK"}
