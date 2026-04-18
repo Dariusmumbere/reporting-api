@@ -7,7 +7,6 @@ from pydantic import BaseModel, EmailStr, validator
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta, date
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 import os
 import uuid
 import json
@@ -62,7 +61,6 @@ SECRET_KEY = "your-secret-key-here"  # In production, use a proper secret key fr
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 # Email configuration
