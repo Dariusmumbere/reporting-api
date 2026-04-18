@@ -80,12 +80,18 @@ def get_db():
         yield db
     finally:
         db.close()
+        
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(
+        plain_password.encode('utf-8'),
+        hashed_password.encode('utf-8')
+    )
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
+def get_password_hash(password: str) -> str:
+    return bcrypt.hashpw(
+        password.encode('utf-8'),
+        bcrypt.gensalt()
+    ).decode('utf-8')
 
 def get_user(db: Session, email: str):
     return db.query(User).filter(User.email == email).first()
