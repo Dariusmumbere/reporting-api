@@ -70,7 +70,6 @@ SMTP_PORT = 587
 SMTP_USERNAME = "dariusmumbere@gmail.com"
 SMTP_PASSWORD = "mxsjjvrrxckcjxug"
 EMAIL_FROM = "ReportHub <noreply@reporthub.com>"
-OTP_EXPIRATION_MINUTES = 10
 
 # Utility functions
 def get_db():
@@ -113,54 +112,20 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def send_verification_email(email: str, otp: str):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_FROM
-        msg['To'] = email
-        msg['Subject'] = "Verify your email for ReportHub"
-        
-        body = f"""
-        <html>
-            <body>
-                <h2>ReportHub Email Verification</h2>
-                <p>Thank you for signing up with ReportHub!</p>
-                <p>Your verification code is: <strong>{otp}</strong></p>
-                <p>This code will expire in {OTP_EXPIRATION_MINUTES} minutes.</p>
-                <p>If you didn't request this, please ignore this email.</p>
-                <br>
-                <p>Best regards,</p>
-                <p>The ReportHub Team</p>
-            </body>
-        </html>
-        """
-        
-        msg.attach(MIMEText(body, 'html'))
-        
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-        
-        return True
-    except Exception as e:
-        print(f"Error sending email: {e}")
-        return False
-
 async def upload_to_b2(file: UploadFile, file_path: str) -> str:
     """Upload a file to Backblaze B2 and return the public URL"""
     try:
         file_ext = os.path.splitext(file.filename)[1]
         filename = f"{uuid.uuid4()}{file_ext}"
         object_key = f"attachments/{filename}"
-        
+
         b2_client.upload_fileobj(
             file.file,
             B2_BUCKET_NAME,
             object_key,
             ExtraArgs={'ContentType': file.content_type}
         )
-        
+
         public_url = f"{B2_ENDPOINT_URL}/{B2_BUCKET_NAME}/{object_key}"
         return public_url
     except Exception as e:
@@ -183,14 +148,14 @@ class Organization(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
-    logo_data = Column(LargeBinary, nullable=True) 
+    logo_data = Column(LargeBinary, nullable=True)
     logo_content_type = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     templates = relationship("ReportTemplate", back_populates="organization")
 
     users = relationship("User", back_populates="organization")
     reports = relationship("Report", back_populates="organization")
-    
+
 class User(Base):
     __tablename__ = "users"
 
@@ -260,19 +225,9 @@ class ChatMessage(Base):
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
     recipient = relationship("User", foreign_keys=[recipient_id], back_populates="received_messages")
 
-class EmailVerification(Base):
-    __tablename__ = "email_verifications"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, index=True, nullable=False)
-    otp = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    expires_at = Column(DateTime(timezone=True))
-    is_verified = Column(Boolean, default=False)
-
 class ReportTemplate(Base):
     __tablename__ = "report_templates"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     description = Column(String)
@@ -281,14 +236,14 @@ class ReportTemplate(Base):
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
+
     organization = relationship("Organization", back_populates="templates")
     creator = relationship("User")
     fields = relationship("TemplateField", back_populates="template")
 
 class TemplateField(Base):
     __tablename__ = "template_fields"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     template_id = Column(Integer, ForeignKey("report_templates.id"))
     name = Column(String, nullable=False)
@@ -299,7 +254,7 @@ class TemplateField(Base):
     options = Column(JSON, nullable=True)
     default_value = Column(String, nullable=True)
     placeholder = Column(String, nullable=True)
-    
+
     template = relationship("ReportTemplate", back_populates="fields")
 
 class InvitationLink(Base):
@@ -329,7 +284,7 @@ class Notification(Base):
 
     user = relationship("User", back_populates="notifications")
 
-    
+
 # Initialize default admin user
 def init_default_admin():
     db = SessionLocal()
@@ -340,7 +295,7 @@ def init_default_admin():
             db.add(org)
             db.commit()
             db.refresh(org)
-            
+
             hashed_password = get_password_hash("Admin123!")
             admin = User(
                 name="Super Admin",
@@ -361,8 +316,8 @@ def init_default_admin():
 # Pydantic models
 class ChatbotMessage(BaseModel):
     message: str
-    context: Optional[str] = None 
-    
+    context: Optional[str] = None
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -374,14 +329,14 @@ class TokenData(BaseModel):
 class UserBase(BaseModel):
     email: EmailStr
     name: str
-    
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str
-    
+
 class UserCreate(UserBase):
     password: str
     role: str = "staff"
@@ -432,7 +387,7 @@ class ReportInDB(ReportBase):
     organization_name: str
     created_at: datetime
     updated_at: Optional[datetime]
-    template_id: Optional[int] = None 
+    template_id: Optional[int] = None
     template_data: Optional[dict] = None
     attachments: List[dict] = []
 
@@ -459,7 +414,7 @@ class OrganizationCreate(BaseModel):
 class OrganizationInDB(BaseModel):
     id: int
     name: str
-    logo_url: Optional[str] = None 
+    logo_url: Optional[str] = None
     created_at: datetime
     user_count: int
     report_count: int
@@ -482,13 +437,6 @@ class ChatUser(BaseModel):
     status: str
     unread_count: int = 0
 
-class EmailVerificationRequest(BaseModel):
-    email: EmailStr
-
-class VerifyOTPRequest(BaseModel):
-    email: EmailStr
-    otp: str
-
 class TemplateFieldBase(BaseModel):
     name: str
     label: str
@@ -505,7 +453,7 @@ class TemplateFieldCreate(TemplateFieldBase):
 class TemplateFieldInDB(TemplateFieldBase):
     id: int
     template_id: int
-    
+
     class Config:
         from_attributes = True
 
@@ -524,7 +472,7 @@ class ReportTemplateInDB(ReportTemplateBase):
     created_at: datetime
     updated_at: Optional[datetime]
     fields: List[TemplateFieldInDB] = []
-    
+
     class Config:
         from_attributes = True
 
@@ -540,7 +488,7 @@ class InvitationResponse(BaseModel):
     expires_at: datetime
     is_used: bool
     created_by: UserBasicInfo
-    
+
     class Config:
         orm_mode = True
 
@@ -555,7 +503,7 @@ class NotificationInDB(BaseModel):
     class Config:
         from_attributes = True
 
-        
+
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -570,14 +518,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         token_data = TokenData(email=email)
     except JWTError:
         raise credentials_exception
-    
+
     user = get_user(db, email=token_data.email)
     if user is None:
         raise credentials_exception
-    
+
     user.last_active = datetime.utcnow()
     db.commit()
-    
+
     return user
 
 async def get_current_active_user(current_user: UserInDB = Depends(get_current_user)):
@@ -599,7 +547,7 @@ async def is_org_admin_or_super_admin(current_user: UserInDB = Depends(get_curre
     if current_user.role not in ["admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
-    
+
 Base.metadata.create_all(bind=engine)
 
 # Initialize FastAPI app
@@ -705,7 +653,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
                         status="delivered",
                         message_type="text"
                     )
-                
+
                 db.add(db_message)
                 db.commit()
                 db.refresh(db_message)
@@ -754,7 +702,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
 # Auth routes
 @app.post("/auth/login", response_model=Token)
 async def login_for_access_token(
-    form_data: OAuth2PasswordRequestForm = Depends(), 
+    form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
     user = authenticate_user(db, form_data.username, form_data.password)
@@ -764,16 +712,16 @@ async def login_for_access_token(
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
-    
+
     requires_org_registration = user.organization_id is None and user.role != "super_admin"
-    
+
     return {
-        "access_token": access_token, 
+        "access_token": access_token,
         "token_type": "bearer",
         "requires_org_registration": requires_org_registration
     }
@@ -785,60 +733,6 @@ async def read_users_me(current_user: UserInDB = Depends(get_current_active_user
         user_data["organization_name"] = current_user.organization.name
     return UserInDB(**user_data)
 
-@app.post("/auth/send-verification-email")
-async def send_verification_email_endpoint(
-    email_request: EmailVerificationRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
-    existing_user = get_user(db, email_request.email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
-    
-    otp = str(random.randint(100000, 999999))
-    
-    db.query(EmailVerification).filter(
-        EmailVerification.email == email_request.email
-    ).delete()
-    
-    verification = EmailVerification(
-        email=email_request.email,
-        otp=otp,
-        expires_at=datetime.utcnow() + timedelta(minutes=OTP_EXPIRATION_MINUTES)
-    )
-    
-    db.add(verification)
-    db.commit()
-    
-    background_tasks.add_task(send_verification_email, email_request.email, otp)
-    
-    return {"message": "Verification email sent"}
-
-@app.post("/auth/verify-otp")
-async def verify_otp(
-    otp_request: VerifyOTPRequest,
-    db: Session = Depends(get_db)
-):
-    verification = db.query(EmailVerification).filter(
-        EmailVerification.email == otp_request.email,
-        EmailVerification.otp == otp_request.otp,
-        EmailVerification.expires_at > datetime.utcnow()
-    ).first()
-    
-    if not verification:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired OTP"
-        )
-    
-    verification.is_verified = True
-    db.commit()
-    
-    return {"message": "Email verified successfully"}
-    
 @app.post("/auth/signup", response_model=Token)
 async def signup_user(
     name: str = Form(...),
@@ -854,35 +748,24 @@ async def signup_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
-    verification = db.query(EmailVerification).filter(
-        EmailVerification.email == email,
-        EmailVerification.is_verified == True
-    ).first()
-    
-    if not verification:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email not verified"
-        )
-    
+
     if not organization_name and not invite_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Either organization name or invitation token is required"
         )
-    
+
     if organization_name and invite_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot provide both organization name and invitation token"
         )
-    
+
     hashed_password = get_password_hash(password)
-    
+
     is_first_user = db.query(User).count() == 0
     role = "admin" if is_first_user else "staff"
-    
+
     db_user = User(
         email=email,
         name=name,
@@ -890,28 +773,28 @@ async def signup_user(
         role=role,
         organization_id=None
     )
-    
+
     if invite_token:
         invitation = db.query(InvitationLink).filter(
             InvitationLink.token == invite_token,
             InvitationLink.expires_at >= datetime.utcnow(),
             InvitationLink.is_used == False
         ).first()
-        
+
         if not invitation:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or expired invitation link"
             )
-        
+
         db_user.organization_id = invitation.organization_id
         db_user.role = "staff"
         invitation.is_used = True
-    
+
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    
+
     if organization_name:
         existing_org = db.query(Organization).filter(Organization.name == organization_name).first()
         if existing_org:
@@ -919,22 +802,22 @@ async def signup_user(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Organization name already exists"
             )
-        
+
         db_org = Organization(name=organization_name)
         db.add(db_org)
         db.commit()
         db.refresh(db_org)
-        
+
         db_user.organization_id = db_org.id
         db_user.role = "admin"
         db.commit()
         db.refresh(db_user)
-    
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": db_user.email}, expires_delta=access_token_expires
     )
-    
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -952,25 +835,25 @@ async def register_organization(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User already belongs to an organization"
         )
-    
+
     existing_org = db.query(Organization).filter(Organization.name == organization.name).first()
     if existing_org:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Organization name already exists"
         )
-    
+
     db_org = Organization(name=organization.name)
     db.add(db_org)
     db.commit()
     db.refresh(db_org)
-    
+
     if current_user.role != "super_admin":
         current_user.organization_id = db_org.id
         current_user.role = "admin"
         db.commit()
         db.refresh(current_user)
-    
+
     return {"message": "Organization registered successfully"}
 
 # Super Admin routes
@@ -1017,12 +900,12 @@ async def create_organization(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Organization name already exists"
         )
-    
+
     db_org = Organization(name=organization.name)
     db.add(db_org)
     db.commit()
     db.refresh(db_org)
-    
+
     return OrganizationInDB(
         id=db_org.id,
         name=db_org.name,
@@ -1040,13 +923,13 @@ async def delete_organization(
     org = db.query(Organization).filter(Organization.id == org_id).first()
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
-    
+
     db.query(User).filter(User.organization_id == org_id).delete()
     db.query(Report).filter(Report.organization_id == org_id).delete()
-    
+
     db.delete(org)
     db.commit()
-    
+
     return {"message": "Organization deleted successfully"}
 
 @app.get("/super-admin/users", response_model=List[UserInDB])
@@ -1059,14 +942,14 @@ async def get_all_users(
     users = db.query(User).join(
         Organization, User.organization_id == Organization.id, isouter=True
     ).offset(skip).limit(limit).all()
-    
+
     users_data = []
     for user in users:
         user_data = user.__dict__
         if user.organization:
             user_data["organization_name"] = user.organization.name
         users_data.append(UserInDB(**user_data))
-    
+
     return users_data
 
 @app.post("/super-admin/users", response_model=UserInDB)
@@ -1085,19 +968,19 @@ async def create_user_as_super_admin(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
+
     if role not in ["super_admin", "admin", "staff"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid role"
         )
-    
+
     if role != "super_admin" and organization_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Organization is required for non-super admin users"
         )
-    
+
     if organization_id is not None:
         org = db.query(Organization).filter(Organization.id == organization_id).first()
         if not org:
@@ -1105,9 +988,9 @@ async def create_user_as_super_admin(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Organization not found"
             )
-    
+
     hashed_password = get_password_hash(password)
-    
+
     db_user = User(
         email=email,
         name=name,
@@ -1115,11 +998,11 @@ async def create_user_as_super_admin(
         role=role,
         organization_id=organization_id
     )
-    
+
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    
+
     user_data = db_user.__dict__
     if db_user.organization:
         user_data["organization_name"] = db_user.organization.name
@@ -1133,14 +1016,14 @@ async def delete_user_as_super_admin(
 ):
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
-    
+
     db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     db.delete(db_user)
     db.commit()
-    
+
     return {"message": "User deleted successfully"}
 
 @app.get("/super-admin/reports", response_model=List[ReportInDB])
@@ -1156,18 +1039,18 @@ async def get_all_reports(
     ).join(
         Organization, Report.organization_id == Organization.id
     )
-    
+
     if status:
         query = query.filter(Report.status == status)
-    
+
     reports = query.offset(skip).limit(limit).all()
-    
+
     reports_data = []
     for report in reports:
         report_data = report.__dict__
         report_data["author_name"] = report.author.name
         report_data["organization_name"] = report.organization.name
-        
+
         attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
         report_data["attachments"] = [
             {
@@ -1178,9 +1061,9 @@ async def get_all_reports(
                 "url": a.url
             } for a in attachments
         ]
-        
+
         reports_data.append(ReportInDB(**report_data))
-    
+
     return reports_data
 
 @app.patch("/super-admin/reports/{report_id}/status", response_model=ReportInDB)
@@ -1191,20 +1074,20 @@ async def update_report_status_as_super_admin(
     current_user: UserInDB = Depends(is_super_admin)
 ):
     report = db.query(Report).filter(Report.id == report_id).first()
-    
+
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
+
     report.status = status_update.status
     report.admin_comments = status_update.admin_comments
-    
+
     db.commit()
     db.refresh(report)
-    
+
     report_data = report.__dict__
     report_data["author_name"] = report.author.name
     report_data["organization_name"] = report.organization.name
-    
+
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
         {
@@ -1215,7 +1098,7 @@ async def update_report_status_as_super_admin(
             "url": a.url
         } for a in attachments
     ]
-    
+
     return ReportInDB(**report_data)
 
 @app.delete("/super-admin/reports/{report_id}")
@@ -1225,22 +1108,22 @@ async def delete_report_as_super_admin(
     current_user: UserInDB = Depends(is_super_admin)
 ):
     report = db.query(Report).filter(Report.id == report_id).first()
-    
+
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
+
     attachments = db.query(Attachment).filter(Attachment.report_id == report_id).all()
     for attachment in attachments:
         try:
             await delete_from_b2(attachment.url)
         except Exception as e:
             print(f"Failed to delete attachment from B2: {e}")
-    
+
     db.query(Attachment).filter(Attachment.report_id == report_id).delete()
-    
+
     db.delete(report)
     db.commit()
-    
+
     return {"message": "Report deleted successfully"}
 
 @app.get("/super-admin/stats")
@@ -1254,21 +1137,21 @@ async def get_super_admin_stats(
     pending_reports = db.query(func.count(Report.id)).filter(
         Report.status == "pending"
     ).scalar()
-    
+
     recent_orgs = db.query(Organization).order_by(
         Organization.created_at.desc()
     ).limit(5).all()
-    
+
     recent_orgs_data = []
     for org in recent_orgs:
         user_count = db.query(func.count(User.id)).filter(
             User.organization_id == org.id
         ).scalar()
-        
+
         report_count = db.query(func.count(Report.id)).filter(
             Report.organization_id == org.id
         ).scalar()
-        
+
         recent_orgs_data.append({
             "id": org.id,
             "name": org.name,
@@ -1276,7 +1159,7 @@ async def get_super_admin_stats(
             "user_count": user_count,
             "report_count": report_count
         })
-    
+
     return {
         "total_organizations": total_organizations,
         "total_users": total_users,
@@ -1345,18 +1228,18 @@ async def get_chat_messages(
 # User routes
 @app.post("/users", response_model=UserInDB)
 async def create_user(
-    user: UserCreate, 
+    user: UserCreate,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_org_admin_or_super_admin)
 ):
     db_user = get_user(db, email=user.email)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     hashed_password = get_password_hash(user.password)
-    
+
     org_id = current_user.organization_id if current_user.role != "super_admin" else None
-    
+
     db_user = User(
         email=user.email,
         name=user.name,
@@ -1364,11 +1247,11 @@ async def create_user(
         role=user.role,
         organization_id=org_id
     )
-    
+
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    
+
     user_data = db_user.__dict__
     if db_user.organization:
         user_data["organization_name"] = db_user.organization.name
@@ -1376,7 +1259,7 @@ async def create_user(
 
 @app.get("/users", response_model=List[UserInDB])
 async def read_users(
-    skip: int = 0, 
+    skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(is_org_admin_or_super_admin)
@@ -1387,14 +1270,14 @@ async def read_users(
         users = db.query(User).filter(
             User.organization_id == current_user.organization_id
         ).offset(skip).limit(limit).all()
-    
+
     users_data = []
     for user in users:
         user_data = user.__dict__
         if user.organization:
             user_data["organization_name"] = user.organization.name
         users_data.append(UserInDB(**user_data))
-    
+
     return users_data
 
 @app.get("/users/{user_id}", response_model=UserInDB)
@@ -1410,10 +1293,10 @@ async def read_user(
             User.id == user_id,
             User.organization_id == current_user.organization_id
         ).first()
-    
+
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     user_data = db_user.__dict__
     if db_user.organization:
         user_data["organization_name"] = db_user.organization.name
@@ -1427,7 +1310,7 @@ async def delete_user(
 ):
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
-    
+
     if current_user.role == "super_admin":
         db_user = db.query(User).filter(User.id == user_id).first()
     else:
@@ -1435,13 +1318,13 @@ async def delete_user(
             User.id == user_id,
             User.organization_id == current_user.organization_id
         ).first()
-    
+
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     db.delete(db_user)
     db.commit()
-    
+
     return {"message": "User deleted successfully"}
 
 # Report routes
@@ -1461,7 +1344,7 @@ async def create_report(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User must belong to an organization to create reports"
         )
-    
+
     template_data = None
     if template_fields:
         try:
@@ -1471,7 +1354,7 @@ async def create_report(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid template fields data"
             )
-    
+
     db_report = Report(
         title=title,
         description=description,
@@ -1481,16 +1364,16 @@ async def create_report(
         template_id=template_id,
         template_data=template_data
     )
-    
+
     db.add(db_report)
     db.commit()
     db.refresh(db_report)
-    
+
     saved_attachments = []
     for attachment in attachments:
         try:
             file_url = await upload_to_b2(attachment, f"reports/{db_report.id}")
-            
+
             db_attachment = Attachment(
                 name=attachment.filename,
                 type=attachment.content_type,
@@ -1499,7 +1382,7 @@ async def create_report(
                 report_id=db_report.id,
                 uploader_id=current_user.id
             )
-            
+
             db.add(db_attachment)
             saved_attachments.append({
                 "id": db_attachment.id,
@@ -1511,11 +1394,11 @@ async def create_report(
         except Exception as e:
             print(f"Error processing attachment: {e}")
             continue
-    
+
     await create_report_notification(db, db_report, "created", current_user)
-    
+
     db.commit()
-    
+
     report_data = db_report.__dict__
     report_data["author_name"] = current_user.name
     if db_report.organization:
@@ -1526,7 +1409,7 @@ async def create_report(
     report_data["template_fields"] = template_data
 
     return ReportInDB(**report_data)
-    
+
 @app.get("/reports", response_model=List[ReportInDB])
 async def read_reports(
     skip: int = 0,
@@ -1540,19 +1423,19 @@ async def read_reports(
     else:
         if current_user.organization_id is None:
             return []
-        
+
         query = db.query(Report).filter(
             Report.organization_id == current_user.organization_id
         )
-        
+
         if current_user.role != "admin":
             query = query.filter(Report.author_id == current_user.id)
-    
+
     if status:
         query = query.filter(Report.status == status)
-    
+
     reports = query.offset(skip).limit(limit).all()
-    
+
     reports_data = []
     for report in reports:
         report_data = report.__dict__
@@ -1562,7 +1445,7 @@ async def read_reports(
             report_data["organization_name"] = report.organization.name
         else:
             report_data["organization_name"] = "No Organization"
-        
+
         attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
         report_data["attachments"] = [
             {
@@ -1573,9 +1456,9 @@ async def read_reports(
                 "url": a.url
             } for a in attachments
         ]
-        
+
         reports_data.append(ReportInDB(**report_data))
-    
+
     return reports_data
 
 @app.get("/reports/{report_id}", response_model=ReportInDB)
@@ -1592,18 +1475,18 @@ async def read_report(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="User must belong to an organization to view reports"
             )
-        
+
         report = db.query(Report).filter(
             Report.id == report_id,
             Report.organization_id == current_user.organization_id
         ).first()
-    
+
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
+
     if current_user.role != "admin" and current_user.role != "super_admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to access this report")
-    
+
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
@@ -1611,7 +1494,7 @@ async def read_report(
         report_data["organization_name"] = report.organization.name
     else:
         report_data["organization_name"] = "No Organization"
-    
+
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
         {
@@ -1622,9 +1505,9 @@ async def read_report(
             "url": a.url
         } for a in attachments
     ]
-    
+
     report_data["template_data"] = report.template_data
-    
+
     return ReportInDB(**report_data)
 
 @app.patch("/reports/{report_id}", response_model=ReportInDB)
@@ -1642,18 +1525,18 @@ async def update_report(
             Report.id == report_id,
             Report.organization_id == current_user.organization_id
         ).first()
-    
+
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
+
     if status is not None:
         report.status = status
     if admin_comments is not None:
         report.admin_comments = admin_comments
-    
+
     db.commit()
     db.refresh(report)
-    
+
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
@@ -1661,7 +1544,7 @@ async def update_report(
         report_data["organization_name"] = report.organization.name
     else:
         report_data["organization_name"] = "No Organization"
-    
+
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
         {
@@ -1672,7 +1555,7 @@ async def update_report(
             "url": a.url
         } for a in attachments
     ]
-    
+
     return ReportInDB(**report_data)
 
 @app.delete("/reports/{report_id}")
@@ -1688,25 +1571,25 @@ async def delete_report(
             Report.id == report_id,
             Report.organization_id == current_user.organization_id
         ).first()
-    
+
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
+
     if current_user.role != "admin" and current_user.role != "super_admin" and report.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this report")
-    
+
     attachments = db.query(Attachment).filter(Attachment.report_id == report_id).all()
     for attachment in attachments:
         try:
             await delete_from_b2(attachment.url)
         except Exception as e:
             print(f"Failed to delete attachment from B2: {e}")
-    
+
     db.query(Attachment).filter(Attachment.report_id == report_id).delete()
-    
+
     db.delete(report)
     db.commit()
-    
+
     return {"message": "Report deleted successfully"}
 
 @app.patch("/reports/{report_id}/status", response_model=ReportInDB)
@@ -1723,16 +1606,16 @@ async def update_report_status(
             Report.id == report_id,
             Report.organization_id == current_user.organization_id
         ).first()
-    
+
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
-    
+
     report.status = status_update.status
     report.admin_comments = status_update.admin_comments
     await create_report_notification(db, report, "status_changed", current_user)
     db.commit()
     db.refresh(report)
-    
+
     report_data = report.__dict__
     author = db.query(User).filter(User.id == report.author_id).first()
     report_data["author_name"] = author.name
@@ -1740,7 +1623,7 @@ async def update_report_status(
         report_data["organization_name"] = report.organization.name
     else:
         report_data["organization_name"] = "No Organization"
-    
+
     attachments = db.query(Attachment).filter(Attachment.report_id == report.id).all()
     report_data["attachments"] = [
         {
@@ -1774,7 +1657,7 @@ async def upload_voice_message(
             )
 
         file_url = await upload_to_b2(voice_message, f"voice_messages/{current_user.id}")
-        
+
         db_message = ChatMessage(
             sender_id=current_user.id,
             recipient_id=recipient_id,
@@ -1783,7 +1666,7 @@ async def upload_voice_message(
             status="delivered",
             message_type="voice"
         )
-        
+
         db.add(db_message)
         db.commit()
         db.refresh(db_message)
@@ -1813,23 +1696,23 @@ async def get_organization_details(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User does not belong to an organization"
         )
-    
+
     org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
-    
+
     logo_url = None
     if org.logo_data:
         logo_url = f"data:{org.logo_content_type};base64,{base64.b64encode(org.logo_data).decode('utf-8')}"
-    
+
     user_count = db.query(func.count(User.id)).filter(
         User.organization_id == org.id
     ).scalar()
-    
+
     report_count = db.query(func.count(Report.id)).filter(
         Report.organization_id == org.id
     ).scalar()
-    
+
     return OrganizationInDB(
         id=org.id,
         name=org.name,
@@ -1851,13 +1734,13 @@ async def update_organization(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User does not belong to an organization"
         )
-    
+
     org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
-    
+
     updated = False
-    
+
     if name is not None and name != org.name:
         existing_org = db.query(Organization).filter(
             Organization.name == name,
@@ -1868,26 +1751,26 @@ async def update_organization(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Organization name already exists"
             )
-        
+
         org.name = name
         updated = True
-    
+
     if logo is not None:
         try:
             logo_data = await logo.read()
-            
+
             if not logo.content_type.startswith('image/'):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Only image files are allowed for logos"
                 )
-            
+
             if len(logo_data) > 2 * 1024 * 1024:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Logo file size must be less than 2MB"
                 )
-            
+
             org.logo_data = logo_data
             org.logo_content_type = logo.content_type
             updated = True
@@ -1896,11 +1779,11 @@ async def update_organization(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to process logo: {str(e)}"
             )
-    
+
     if updated:
         db.commit()
         db.refresh(org)
-    
+
     return {"message": "Organization updated successfully"}
 
 @app.get("/download/{file_name}")
@@ -1911,7 +1794,7 @@ async def download_file(file_name: str):
             Bucket=B2_BUCKET_NAME,
             Key=object_key
         )
-        
+
         return StreamingResponse(
             response['Body'],
             media_type=response['ContentType'],
@@ -1921,7 +1804,7 @@ async def download_file(file_name: str):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 @app.post("/templates", response_model=ReportTemplateInDB)
 async def create_template(
     template: ReportTemplateCreate,
@@ -1933,13 +1816,13 @@ async def create_template(
         ReportTemplate.name == template.name,
         ReportTemplate.organization_id == current_user.organization_id
     ).first()
-    
+
     if existing_template:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Template with this name already exists"
         )
-    
+
     db_template = ReportTemplate(
         name=template.name,
         description=template.description,
@@ -1947,11 +1830,11 @@ async def create_template(
         organization_id=current_user.organization_id,
         created_by=current_user.id
     )
-    
+
     db.add(db_template)
     db.commit()
     db.refresh(db_template)
-    
+
     for field in template.fields:
         db_field = TemplateField(
             template_id=db_template.id,
@@ -1965,12 +1848,12 @@ async def create_template(
             placeholder=field.placeholder
         )
         db.add(db_field)
-    
+
     db.commit()
     db.refresh(db_template)
-    
+
     background_tasks.add_task(notify_users_about_new_template, db, db_template, current_user)
-    
+
     return db_template
 
 async def notify_users_about_new_template(db: Session, template: ReportTemplate, creator: User):
@@ -1980,7 +1863,7 @@ async def notify_users_about_new_template(db: Session, template: ReportTemplate,
             User.organization_id == template.organization_id,
             User.id != creator.id
         ).all()
-        
+
         for user in users:
             notification = Notification(
                 user_id=user.id,
@@ -1990,7 +1873,7 @@ async def notify_users_about_new_template(db: Session, template: ReportTemplate,
                 link=f"/templates/{template.id}"
             )
             db.add(notification)
-        
+
         db.commit()
     except Exception as e:
         logger.error(f"Failed to create template notifications: {e}")
@@ -2009,7 +1892,7 @@ async def get_templates(
         templates = db.query(ReportTemplate).filter(
             ReportTemplate.organization_id == current_user.organization_id
         ).offset(skip).limit(limit).all()
-    
+
     return templates
 
 @app.get("/templates/{template_id}", response_model=ReportTemplateInDB)
@@ -2027,10 +1910,10 @@ async def get_template(
             ReportTemplate.id == template_id,
             ReportTemplate.organization_id == current_user.organization_id
         ).first()
-    
+
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
-    
+
     return template
 
 @app.put("/templates/{template_id}", response_model=ReportTemplateInDB)
@@ -2049,31 +1932,31 @@ async def update_template(
             ReportTemplate.id == template_id,
             ReportTemplate.organization_id == current_user.organization_id
         ).first()
-    
+
     if db_template is None:
         raise HTTPException(status_code=404, detail="Template not found")
-    
+
     existing_template = db.query(ReportTemplate).filter(
         ReportTemplate.name == template.name,
         ReportTemplate.organization_id == current_user.organization_id,
         ReportTemplate.id != template_id
     ).first()
-    
+
     if existing_template:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Template with this name already exists"
         )
-    
+
     db_template.name = template.name
     db_template.description = template.description
     db_template.category = template.category
     db_template.updated_at = datetime.utcnow()
-    
+
     db.query(TemplateField).filter(
         TemplateField.template_id == template_id
     ).delete()
-    
+
     for field in template.fields:
         db_field = TemplateField(
             template_id=db_template.id,
@@ -2087,10 +1970,10 @@ async def update_template(
             placeholder=field.placeholder
         )
         db.add(db_field)
-    
+
     db.commit()
     db.refresh(db_template)
-    
+
     return db_template
 
 @app.delete("/templates/{template_id}")
@@ -2108,17 +1991,17 @@ async def delete_template(
             ReportTemplate.id == template_id,
             ReportTemplate.organization_id == current_user.organization_id
         ).first()
-    
+
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
-    
+
     db.query(TemplateField).filter(
         TemplateField.template_id == template_id
     ).delete()
-    
+
     db.delete(template)
     db.commit()
-    
+
     return {"message": "Template deleted successfully"}
 
 @app.delete("/chat/messages/{message_id}")
@@ -2128,32 +2011,32 @@ async def delete_message(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     message = db.query(ChatMessage).filter(ChatMessage.id == message_id).first()
-    
+
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-    
+
     if message.sender_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only delete your own messages"
         )
-    
+
     if message.message_type == "voice" and message.content.startswith("[VOICE_MESSAGE]"):
         try:
             audio_url = message.content.replace("[VOICE_MESSAGE]", "")
             await delete_from_b2(audio_url)
         except Exception as e:
             print(f"Error deleting voice message file: {e}")
-    
+
     db.delete(message)
     db.commit()
-    
+
     if message.recipient_id in manager.active_connections:
         await manager.send_personal_message(json.dumps({
             "type": "message_deleted",
             "message_id": message_id
         }), message.recipient_id)
-    
+
     return {"message": "Message deleted successfully"}
 
 @app.get("/dashboard")
@@ -2174,7 +2057,7 @@ async def get_dashboard_data(
         interval = "day"
 
     base_query = db.query(Report)
-    
+
     if current_user.role != "super_admin":
         if not current_user.organization_id:
             raise HTTPException(
@@ -2200,7 +2083,7 @@ async def get_dashboard_data(
         for i in range(24):
             hour_start = start_date + timedelta(hours=i)
             hour_end = hour_start + timedelta(hours=1)
-            
+
             trend_query = base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
             hour_counts = trend_query.filter(
                 Report.created_at >= hour_start,
@@ -2211,7 +2094,7 @@ async def get_dashboard_data(
                 func.count(case((Report.status == "approved", 1))).label("approved"),
                 func.count(case((Report.status == "rejected", 1))).label("rejected")
             ).first()
-            
+
             trend_data.append({
                 "label": hour_start.strftime("%H:00"),
                 "total": hour_counts.total or 0,
@@ -2223,7 +2106,7 @@ async def get_dashboard_data(
         current_date = start_date
         while current_date <= end_date:
             next_date = current_date + timedelta(days=1)
-            
+
             trend_query = base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
             day_counts = trend_query.filter(
                 Report.created_at >= current_date,
@@ -2234,7 +2117,7 @@ async def get_dashboard_data(
                 func.count(case((Report.status == "approved", 1))).label("approved"),
                 func.count(case((Report.status == "rejected", 1))).label("rejected")
             ).first()
-            
+
             trend_data.append({
                 "label": current_date.strftime("%b %d"),
                 "total": day_counts.total or 0,
@@ -2245,13 +2128,13 @@ async def get_dashboard_data(
             current_date = next_date
 
     categories_query = (base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
-                      ).with_entities(
-                          Report.category,
-                          func.count(Report.id)
-                      ).group_by(Report.category)
-    
+                        ).with_entities(
+        Report.category,
+        func.count(Report.id)
+    ).group_by(Report.category)
+
     categories_data = [
-        {"name": cat[0], "count": cat[1]} 
+        {"name": cat[0], "count": cat[1]}
         for cat in categories_query.all()
     ]
 
@@ -2281,7 +2164,7 @@ async def get_dashboard_data(
     }
 
     recent_reports_query = (base_query if current_user.role in ["admin", "super_admin"] else user_specific_query
-                          ).order_by(Report.created_at.desc()).limit(5)
+                            ).order_by(Report.created_at.desc()).limit(5)
     recent_reports = recent_reports_query.all()
 
     recent_activity = []
@@ -2322,7 +2205,7 @@ async def get_dashboard_data(
         "recentReports": recent_reports_data,
         "data_scope": "organization" if current_user.role == "admin" else "personal" if current_user.role not in ["admin", "super_admin"] else "all"
     }
-    
+
 @app.post("/invitations/generate", response_model=dict)
 async def generate_invitation_link(
     db: Session = Depends(get_db),
@@ -2330,20 +2213,20 @@ async def generate_invitation_link(
 ):
     token = str(uuid.uuid4())
     expires_at = datetime.utcnow() + timedelta(days=7)
-    
+
     invitation = InvitationLink(
         token=token,
         created_by_id=current_user.id,
         organization_id=current_user.organization_id,
         expires_at=expires_at
     )
-    
+
     db.add(invitation)
     db.commit()
     db.refresh(invitation)
-    
+
     invite_url = f"{token}"
-    
+
     return {"invite_url": invite_url}
 
 @app.get("/invitations/validate/{token}", response_model=dict)
@@ -2356,13 +2239,13 @@ async def validate_invitation_token(
         InvitationLink.expires_at >= datetime.utcnow(),
         InvitationLink.is_used == False
     ).first()
-    
+
     if not invitation:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired invitation link"
         )
-    
+
     return {
         "valid": True,
         "organization_id": invitation.organization_id,
@@ -2382,22 +2265,22 @@ async def accept_invitation(
         InvitationLink.expires_at >= datetime.utcnow(),
         InvitationLink.is_used == False
     ).first()
-    
+
     if not invitation:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired invitation link"
         )
-    
+
     existing_user = get_user(db, email)
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
+
     hashed_password = get_password_hash(password)
-    
+
     db_user = User(
         email=email,
         name=name,
@@ -2405,23 +2288,23 @@ async def accept_invitation(
         role="staff",
         organization_id=invitation.organization_id
     )
-    
+
     db.add(db_user)
-    
+
     invitation.is_used = True
     db.commit()
     db.refresh(db_user)
-    
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": db_user.email}, expires_delta=access_token_expires
     )
-    
+
     return {
         "access_token": access_token,
         "token_type": "bearer"
     }
-    
+
 @app.get("/invitations", response_model=List[InvitationResponse])
 async def get_invitations(
     db: Session = Depends(get_db),
@@ -2430,7 +2313,7 @@ async def get_invitations(
     invitations = db.query(InvitationLink).filter(
         InvitationLink.organization_id == current_user.organization_id
     ).order_by(InvitationLink.created_at.desc()).all()
-    
+
     return invitations
 
 @app.delete("/invitations/{invite_id}")
@@ -2443,16 +2326,16 @@ async def revoke_invitation(
         InvitationLink.id == invite_id,
         InvitationLink.organization_id == current_user.organization_id
     ).first()
-    
+
     if not invitation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invitation not found"
         )
-    
+
     db.delete(invitation)
     db.commit()
-    
+
     return {"message": "Invitation revoked successfully"}
 
 @app.post("/auth/forgot-password")
@@ -2464,14 +2347,14 @@ async def forgot_password(
     user = get_user(db, request.email)
     if not user:
         return {"message": "If the email exists, a password reset link has been sent"}
-    
+
     reset_token = create_access_token(
         data={"sub": user.email, "purpose": "password_reset"},
         expires_delta=timedelta(minutes=30)
     )
-    
+
     background_tasks.add_task(send_password_reset_email, user.email, reset_token)
-    
+
     return {"message": "If the email exists, a password reset link has been sent"}
 
 @app.post("/auth/reset-password")
@@ -2483,25 +2366,25 @@ async def reset_password(
         payload = jwt.decode(request.token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         purpose: str = payload.get("purpose")
-        
+
         if email is None or purpose != "password_reset":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid token"
             )
-            
+
         user = get_user(db, email)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid token"
             )
-            
+
         user.hashed_password = get_password_hash(request.new_password)
         db.commit()
-        
+
         return {"message": "Password updated successfully"}
-        
+
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2511,12 +2394,12 @@ async def reset_password(
 async def send_password_reset_email(email: str, reset_token: str):
     try:
         reset_link = f"https://dariusmumbere.github.io/reporting/reset-password.html?token={reset_token}"
-        
+
         msg = MIMEMultipart()
         msg['From'] = EMAIL_FROM
         msg['To'] = email
         msg['Subject'] = "Password Reset Request"
-        
+
         body = f"""
         <html>
             <body>
@@ -2532,19 +2415,19 @@ async def send_password_reset_email(email: str, reset_token: str):
             </body>
         </html>
         """
-        
+
         msg.attach(MIMEText(body, 'html'))
-        
+
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.send_message(msg)
-        
+
         return True
     except Exception as e:
         print(f"Error sending password reset email: {e}")
         return False
-    
+
 @app.get("/export/reports")
 async def export_reports(
     date_range: str = Query("all", description="Date range filter"),
@@ -2557,13 +2440,13 @@ async def export_reports(
 ):
     try:
         query = db.query(Report)
-        
+
         if current_user.role != "super_admin":
             query = query.filter(Report.organization_id == current_user.organization_id)
-        
+
         if status != "all":
             query = query.filter(Report.status == status)
-        
+
         if date_range != "all":
             now = datetime.utcnow()
             if date_range == "today":
@@ -2591,12 +2474,12 @@ async def export_reports(
                     query = query.filter(Report.created_at >= start, Report.created_at <= end)
                 except ValueError:
                     raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-        
+
         reports = query.all()
-        
+
         if not reports:
             raise HTTPException(status_code=404, detail="No reports found matching criteria")
-        
+
         export_data = []
         for report in reports:
             report_data = {
@@ -2609,62 +2492,62 @@ async def export_reports(
                 "created_at": report.created_at.isoformat(),
                 "updated_at": report.updated_at.isoformat() if report.updated_at else None
             }
-            
+
             if report.template_data:
                 for field_name, field_value in report.template_data.items():
                     if isinstance(field_value, str):
                         field_value = BeautifulSoup(field_value, "html.parser").get_text()
                     report_data[field_name] = field_value
-            
+
             export_data.append(report_data)
-        
+
         if format == "json":
             return JSONResponse(content=export_data)
-        
+
         elif format == "csv":
             import csv
             from io import StringIO
-            
+
             output = StringIO()
             writer = csv.DictWriter(output, fieldnames=export_data[0].keys())
             writer.writeheader()
             writer.writerows(export_data)
-            
+
             return StreamingResponse(
                 iter([output.getvalue()]),
                 media_type="text/csv",
                 headers={"Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.csv"}
             )
-        
+
         elif format == "excel":
             import pandas as pd
             from io import BytesIO
-            
+
             df = pd.DataFrame(export_data)
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df.to_excel(writer, index=False, sheet_name='Reports')
-            
+
             return StreamingResponse(
                 BytesIO(output.getvalue()),
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 headers={"Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.xlsx"}
             )
-        
+
         elif format == "pdf":
             from reportlab.lib.pagesizes import letter
             from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
             from reportlab.lib.styles import getSampleStyleSheet
             from reportlab.lib import colors
             from io import BytesIO
-            
+
             buffer = BytesIO()
             doc = SimpleDocTemplate(buffer, pagesize=letter)
             styles = getSampleStyleSheet()
             elements = []
-            
+
             elements.append(Paragraph("Reports Export", styles['Title']))
-            
+
             if not export_data:
                 elements.append(Paragraph("No reports found", styles['BodyText']))
             else:
@@ -2672,45 +2555,45 @@ async def export_reports(
                 for report in export_data:
                     all_keys.update(report.keys())
                 headers = sorted(all_keys)
-                
+
                 table_data = [headers]
                 for report in export_data:
                     row = [str(report.get(header, "")) for header in headers]
                     table_data.append(row)
-                
+
                 t = Table(table_data)
                 t.setStyle(TableStyle([
-                    ('BACKGROUND', (0,0), (-1,0), colors.grey),
-                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                    ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0,0), (-1,0), 10),
-                    ('BOTTOMPADDING', (0,0), (-1,0), 12),
-                    ('BACKGROUND', (0,1), (-1,-1), colors.beige),
-                    ('GRID', (0,0), (-1,-1), 1, colors.black)
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
                 ]))
                 elements.append(t)
-            
+
             doc.build(elements)
             buffer.seek(0)
-            
+
             return StreamingResponse(
                 buffer,
                 media_type="application/pdf",
                 headers={"Content-Disposition": f"attachment;filename=reports_export_{datetime.now().date()}.pdf"}
             )
-        
+
         else:
             raise HTTPException(status_code=400, detail="Invalid export format")
-            
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 @app.get("/admin/reports-raw")
 async def get_raw_reports(db: Session = Depends(get_db)):
     """Development-only endpoint to get raw report data"""
     reports = db.query(Report).all()
-    
+
     def serialize_report(report):
         result = {}
         for k, v in report.__dict__.items():
@@ -2721,9 +2604,9 @@ async def get_raw_reports(db: Session = Depends(get_db)):
             else:
                 result[k] = v
         return result
-    
+
     return JSONResponse(content=[serialize_report(r) for r in reports])
-    
+
 @app.get("/notifications", response_model=List[NotificationInDB])
 async def get_notifications(
     skip: int = 0,
@@ -2737,10 +2620,10 @@ async def get_notifications(
     ).order_by(
         Notification.created_at.desc()
     )
-    
+
     if unread_only:
         query = query.filter(Notification.is_read == False)
-    
+
     notifications = query.offset(skip).limit(limit).all()
     return notifications
 
@@ -2754,13 +2637,13 @@ async def mark_notification_as_read(
         Notification.id == notification_id,
         Notification.user_id == current_user.id
     ).first()
-    
+
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+
     notification.is_read = True
     db.commit()
-    
+
     return {"message": "Notification marked as read"}
 
 async def create_report_notification(
@@ -2770,25 +2653,25 @@ async def create_report_notification(
     current_user: UserInDB
 ):
     recipients = []
-    
+
     if action == "created":
         recipients = db.query(User).filter(
             User.organization_id == report.organization_id,
             User.role == "admin",
             User.id != current_user.id
         ).all()
-        
+
         title = "New Report Submitted"
         message = f"A new report '{report.title}' has been submitted by {current_user.name}"
         link = f"/reports/{report.id}"
     elif action == "status_changed":
         if report.author_id != current_user.id:
             recipients = [report.author]
-            
+
             title = "Report Status Updated"
             message = f"Your report '{report.title}' status has been updated to {report.status}"
             link = f"/reports/{report.id}"
-    
+
     for recipient in recipients:
         notification = Notification(
             user_id=recipient.id,
@@ -2798,7 +2681,7 @@ async def create_report_notification(
             link=link
         )
         db.add(notification)
-    
+
     db.commit()
 
 @app.post("/notifications/mark-all-read")
@@ -2811,7 +2694,7 @@ async def mark_all_notifications_as_read(
         Notification.is_read == False
     ).update({"is_read": True})
     db.commit()
-    
+
     return {"message": "All notifications marked as read"}
 
 @app.post("/chatbot/ask", response_model=Dict[str, str])
@@ -2853,8 +2736,4 @@ async def ask_chatbot(
 
 @app.options("/notifications")
 async def options_notifications():
-    return {"message": "OK"}
-
-@app.options("/auth/send-verification-email")
-async def options_send_verification_email():
     return {"message": "OK"}
